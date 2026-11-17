@@ -6,8 +6,14 @@
 
 EMBERFALL: Ashen Arena — a top-down arena-survivor roguelite. Hold the line as the
 Ember Warden: blast ash-spawn with auto-aimed ember bolts, gather embers, choose
-blessings on every level-up, survive 5 waves and slay the Ash Tyrant. Lose when your
+blessings on every level-up, survive 7 waves and slay the Ash Tyrant. Lose when your
 HP reaches zero; restart and try a new build.
+
+The hook is **Kindled Ground**: every bolt sets the floor alight. Fire burns the foes
+standing in it, burning foes trail fire behind them, and the Wildfire blessing makes
+the flames wider, hotter and longer-lived — so the fight is about herding the horde
+through the flames as much as shooting it. Five foe kinds (mite, brute, spitter,
+dasher, splitter), a Tyrantling mini-boss on wave 4, nine stackable blessings.
 
 ## Run it
 

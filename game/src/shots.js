@@ -2,16 +2,26 @@
 // forward from a fresh world for a fixed number of steps, steered by a simple autopilot
 // (flee what is close, chase the nearest ember, drift to the middle when nothing threatens),
 // so the frame is what a real game looks like and the same seed always gives the same frame.
+//
+// The scenes are staged for what the frame must show, not for the earliest moment it can
+// show it: `play` is the Ash Tyrant fight (the boss alive, its bar up, its minions around
+// it, ground-fire burning), and `levelup` is the third blessing choice, when the HUD already
+// shows a build in progress.
 
 import { FIELD, STEP } from './config.js';
 import { AUTOPILOT_PRIORITY } from './upgrades.js';
-import { EVENT_LEVELUP, EVENT_OVER, EVENT_VICTORY, KIND_BOSS } from './world.js';
+import { EVENT_BOSS, EVENT_LEVELUP, EVENT_OVER, EVENT_VICTORY, KIND_BOSS } from './world.js';
 import { SCREEN_LEVELUP, SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE, SCREEN_VICTORY } from './render.js';
 
-const START_SECONDS = 6;
-const PLAY_SECONDS = 100;
-const LEVELUP_LIMIT_SECONDS = 150;
-const END_LIMIT_SECONDS = 480;
+const START_SECONDS = 10;
+const LEVELUP_LIMIT_SECONDS = 240;
+const END_LIMIT_SECONDS = 600;
+/** How long the play scene may run before giving up on the boss (a lost run shows as-is). */
+const PLAY_LIMIT_SECONDS = 480;
+/** Seconds of boss fight the first staging pass watches while it looks for the best frame. */
+const BOSS_WATCH_SECONDS = 20;
+/** Which level-up the levelup scene stops at (the 3rd choice, around level 4). */
+const LEVELUP_STOP_COUNT = 3;
 
 /** How the autopilot steers: flee foes inside this range, chase embers inside this one. */
 const FLEE_RANGE = 150;
@@ -84,39 +94,111 @@ function simulate(world, maxSteps, stop) {
       const pick = autopilotPick(world.state);
       if (pick) world.applyUpgrade(pick);
     }
-    if (stop(events)) return events;
+    if (stop(events, i)) return events;
   }
   return 0;
 }
 
+/** The live Ash Tyrant, or null when the boss fight is not on. */
+function liveBoss(state) {
+  for (const e of state.enemies) {
+    if (e.active && e.kind === KIND_BOSS) return e;
+  }
+  return null;
+}
+
+/** How busy the boss fight looks on one step: foes first, a telegraphing Tyrant next. */
+function bossFrameScore(state) {
+  const boss = liveBoss(state);
+  if (!boss) return -1;
+  let foes = 0;
+  for (const e of state.enemies) if (e.active) foes += 1;
+  const telegraph = boss.mode === 'telegraph' ? 30 : boss.mode === 'charge' ? 15 : 0;
+  return foes * 10 + telegraph + state.fire.activeCount() * 0.5;
+}
+
+/**
+ * Stage the boss fight in two passes over the same deterministic run. The first pass
+ * plays forward until the Ash Tyrant wakes, then watches the fight and remembers the
+ * step that looks busiest — most foes on screen, the Tyrant telegraphing its charge,
+ * ground-fire burning under it all. The second pass replays the same run from the top
+ * and stops exactly on that step, so the frame is a real moment of a real fight, not a
+ * posed one. Both passes start from fresh worlds built by `freshWorld` (same seed),
+ * because a reset world would continue a spent random stream and replay a different run.
+ * Returns the world holding the staged frame, or the first pass's world when the warden
+ * falls before the boss wakes.
+ */
+function stageBossFight(freshWorld) {
+  const first = freshWorld();
+  let bossSeenAt = -1;
+  let bestStep = -1;
+  let bestScore = -1;
+  simulate(first, PLAY_LIMIT_SECONDS / STEP, (ev, i) => {
+    if (bossSeenAt < 0 && (ev & EVENT_BOSS)) bossSeenAt = i;
+    if (bossSeenAt >= 0) {
+      const score = bossFrameScore(first.state);
+      if (score >= bestScore) {
+        bestScore = score;
+        bestStep = i;
+      }
+      if (i - bossSeenAt >= BOSS_WATCH_SECONDS / STEP) return true;
+    }
+    if (ev & (EVENT_OVER | EVENT_VICTORY)) return true;
+    return false;
+  });
+  if (bestStep < 0) return first;
+  // Second pass: the same run, the same seed — stop on the busiest boss-fight step.
+  const second = freshWorld();
+  simulate(second, bestStep + 1, () => false);
+  return second;
+}
+
 /**
  * Set `world` to the named scene (start, play, levelup or end; any other name is start) and
- * return the screen to draw over it and the best score to show.
+ * return the screen to draw over it, the best score to show, and the world holding the
+ * staged frame (`world` itself for every scene except `play`, whose two-pass staging
+ * builds its own fresh worlds — see stageBossFight). `freshWorld` must build a new world
+ * from the same seed; it is only used for `play`.
  */
-export function stageShot(name, world) {
+export function stageShot(name, world, freshWorld) {
+  if (name === 'play' && typeof freshWorld === 'function') {
+    const staged = stageBossFight(freshWorld);
+    return { screen: SCREEN_PLAY, best: staged.state.score, world: staged };
+  }
   world.reset();
   if (name !== 'play' && name !== 'levelup' && name !== 'end') {
     for (let i = 0; i < START_SECONDS / STEP; i += 1) world.step(STEP, { x: 0, y: 0 }, 'title');
-    return { screen: SCREEN_TITLE, best: 0 };
+    return { screen: SCREEN_TITLE, best: 0, world };
   }
   if (name === 'levelup') {
+    // Wait for the third level-up, so the frame shows a mid-run build: wave 3 or so, a
+    // score in the hundreds, and blessing chips already owned. Earlier level-ups are
+    // spent on the autopilot's picks, like a real player choosing as they go.
+    let seen = 0;
     let hit = false;
     for (let i = 0; i < LEVELUP_LIMIT_SECONDS / STEP; i += 1) {
       const events = world.step(STEP, autopilotMove(world.state), 'play');
       if (events & EVENT_LEVELUP) {
-        hit = true;
-        break;
+        seen += 1;
+        if (seen >= LEVELUP_STOP_COUNT) {
+          hit = true;
+          break;
+        }
+        const pick = autopilotPick(world.state);
+        if (pick) world.applyUpgrade(pick);
       }
       if (events & (EVENT_OVER | EVENT_VICTORY)) break;
     }
-    return { screen: hit ? SCREEN_LEVELUP : SCREEN_PLAY, best: world.state.score };
+    return { screen: hit ? SCREEN_LEVELUP : SCREEN_PLAY, best: world.state.score, world };
   }
   if (name === 'end') {
     const events = simulate(world, END_LIMIT_SECONDS / STEP, (e) => (e & (EVENT_OVER | EVENT_VICTORY)) !== 0);
-    if (events & EVENT_VICTORY) return { screen: SCREEN_VICTORY, best: world.state.score };
-    if (world.state.victory) return { screen: SCREEN_VICTORY, best: world.state.score };
-    return { screen: SCREEN_OVER, best: world.state.score };
+    if (events & EVENT_VICTORY) return { screen: SCREEN_VICTORY, best: world.state.score, world };
+    if (world.state.victory) return { screen: SCREEN_VICTORY, best: world.state.score, world };
+    return { screen: SCREEN_OVER, best: world.state.score, world };
   }
-  simulate(world, PLAY_SECONDS / STEP, () => false);
-  return { screen: SCREEN_PLAY, best: world.state.score };
+  // No fresh-world factory: fall back to a fixed-length run (the factory path above is
+  // the one the game itself uses).
+  simulate(world, PLAY_LIMIT_SECONDS / STEP, () => false);
+  return { screen: SCREEN_PLAY, best: world.state.score, world };
 }

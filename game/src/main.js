@@ -3,9 +3,18 @@
 // there. The game moves between six screens: title, play, level-up, paused, game over and
 // victory. Sounds are synthesised, never fetched.
 //
+// What the game is, in one paragraph: a top-down arena survivor in seven waves. The Ember
+// Warden's bolts fire on their own at the nearest foe; the player steers, dodges and
+// gathers. Its one hook is Kindled Ground — every bolt sets the floor alight, and the fire
+// burns foes, spreads as they run, and can be grown by the Wildfire blessing, so the fight
+// is about herding the horde through the flames as much as shooting it. Five foe kinds
+// (mite, brute, spitter, dasher, splitter), a Tyrantling mini-boss on wave 4, and the Ash
+// Tyrant on wave 7; nine stackable blessings; a living title screen with the arena burning
+// behind the panel.
+//
 // ?seed=N fixes the run's rolls. ?shot=start|play|levelup|end (with &seed=N) stages that
 // scene instead of running the loop, paints it twice and sets window.__shotReady for a
-// screenshot.
+// screenshot. ?shot=play stages the Ash Tyrant fight itself.
 //
 // For play-testing, window.__emberfall exposes the screen, the live state and a small debug
 // handle (grant XP, set HP, force a win) — it changes nothing about the game itself.
@@ -81,10 +90,11 @@ function saveBest(value) {
 }
 
 function runShot(name) {
-  const scene = stageShot(name, world);
+  const scene = stageShot(name, world, () => createWorld(createRandom(seed)));
+  const staged = scene.world ?? world;
   let painted = 0;
   function paint() {
-    renderer.draw(world.state, scene.screen, scene.best, false);
+    renderer.draw(staged.state, scene.screen, scene.best, false);
     painted += 1;
     if (painted < 2) requestAnimationFrame(paint);
     else window.__shotReady = true;
@@ -136,7 +146,7 @@ function runGame() {
     world.reset();
     accumulator = 0;
     screen = SCREEN_PLAY;
-    announce('Playing. Survive 5 waves and slay the Ash Tyrant.');
+    announce('Playing. Survive 7 waves and slay the Ash Tyrant.');
   }
 
   function endRun(victory) {

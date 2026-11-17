@@ -6,8 +6,11 @@
 //
 // The game: a top-down arena survivor. Steer the Ember Warden with WASD or the arrow keys;
 // ember bolts fire on their own at the nearest foe. Gather embers from the fallen, level up,
-// choose one of three blessings, survive 5 waves and slay the Ash Tyrant. Synthesised
-// WebAudio sound, mute with M, pause with P, restart with R.
+// choose one of three blessings, survive 7 waves and slay the Ash Tyrant. Its hook is
+// Kindled Ground: every bolt sets the floor alight, and the fire burns foes and spreads as
+// they run — herd the horde through the flames. Five foe kinds, a Tyrantling mini-boss on
+// wave 4, nine stackable blessings. Synthesised WebAudio sound, mute with M, pause with P,
+// restart with R.
 //
 // Serve it locally with `node serve.ts`, then open http://localhost:8080.
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:

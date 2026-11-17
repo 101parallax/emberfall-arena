@@ -1,29 +1,42 @@
 // The game's rules and state, with no drawing and no browser in it: the warden, the ember
-// bolts, three kinds of ash-foe plus the Ash Tyrant, waves, ember XP, level-up choices and the
-// win and loss. step() advances one fixed step and returns what happened as bit flags, so the
-// caller can react (sounds, screens) without the world knowing about screens or sound.
-// Nothing here allocates after createWorld returns, and nothing uses Math.random: the seeded
-// generator drives every roll, so a fixed seed replays the same run.
+// bolts, five kinds of ash-foe plus the Tyrantling and the Ash Tyrant, seven waves, ember
+// XP, level-up choices and the win and loss — and Kindled Ground, the fire the warden's
+// bolts leave on the floor (see groundfire.js), which burns foes and spreads as they run.
+// step() advances one fixed step and returns what happened as bit flags, so the caller can
+// react (sounds, screens) without the world knowing about screens or sound. Nothing here
+// allocates after createWorld returns, and nothing uses Math.random: the seeded generator
+// drives every roll, so a fixed seed replays the same run.
 
 import {
   BETWEEN_WAVE_HEAL,
   BETWEEN_WAVE_SECONDS,
   ENEMY,
   FIELD,
+  GROUNDFIRE,
   HEART_CHANCE,
   HEART_HEAL,
   LAST_WAVE,
   PLAYER,
   POOLS,
+  TITLE_FIRE_SECONDS,
+  TITLE_FOES,
+  TITLE_SPAWN_RATE,
   WAVES,
   xpForLevel,
 } from './config.js';
 import { findUpgrade, rollChoices } from './upgrades.js';
+import { createGroundFire } from './groundfire.js';
 
 export const KIND_MITE = 'mite';
 export const KIND_BRUTE = 'brute';
 export const KIND_SPITTER = 'spitter';
+export const KIND_DASHER = 'dasher';
+export const KIND_SPLITTER = 'splitter';
+export const KIND_TYRANTLING = 'tyrantling';
 export const KIND_BOSS = 'boss';
+
+/** The two big foes that get a health bar across the top of the screen. */
+export const BOSS_KINDS = [KIND_TYRANTLING, KIND_BOSS];
 
 export const EVENT_SHOOT = 1;
 export const EVENT_KILL = 2;
@@ -58,6 +71,9 @@ export function createWorld(random) {
       radius: 10, speed: 100, contact: 5, xp: 1, score: 0, touchTimer: 0,
       shotTimer: 0, orbTimer: 0, flash: 0, mode: 'chase', modeTimer: 0,
       chargeX: 0, chargeY: 0, wanderX: 0, wanderY: 0, wanderTimer: 0, spawnTimer: 0,
+      // Kindled Ground: burnTimer counts down while a foe is alight, burnTick gathers
+      // the time toward the next burn-damage tick, spreadTimer paces the fire it trails.
+      burnTimer: 0, burnTick: 0, spreadTimer: 0,
     });
   }
   const bolts = [];
@@ -84,13 +100,15 @@ export function createWorld(random) {
     numbers.push({ active: false, x: 0, y: 0, value: 0, life: 0, color: '#fff3c4' });
   }
 
+  // The ground-fire system: pooled patches the warden's bolts kindle (groundfire.js).
+  const fire = createGroundFire();
   const state = {
-    player, stats, enemies, bolts, gems, ebullets, particles, numbers,
+    player, stats, enemies, bolts, gems, ebullets, particles, numbers, fire,
     decor: { ruins: [], cracks: [], motes: [] },
     wave: 0, waveState: 'banner', stateTimer: 0, spawnQueue: [], spawnTimer: 0,
     elapsed: 0, score: 0, kills: 0, level: 1, xp: 0, xpNext: xpForLevel(1),
     choices: null, pendingLevels: 0, taken: {}, victory: false, over: false,
-    novaTimer: 6, orbAngle: 0, shake: 0, bossActive: false,
+    novaTimer: 6, orbAngle: 0, shake: 0, bossActive: false, titleFireTimer: 0,
   };
 
   function freshStats() {
@@ -104,6 +122,8 @@ export function createWorld(random) {
       pickupRadius: PLAYER.pickupRadius,
       novaLevel: 0, novaDamage: 0, novaRadius: 120, novaInterval: 6,
       orbs: 0, orbDamage: 10, orbRadius: 74,
+      // Kindled Ground multipliers, grown by the Wildfire blessing.
+      fireRadius: 1, fireDamage: 1, fireDuration: 1,
     };
   }
 
@@ -189,7 +209,7 @@ export function createWorld(random) {
     const e = free(enemies);
     if (!e) return null;
     const def = ENEMY[kind];
-    const at = edgePoint(kind === KIND_BOSS ? 420 : 300);
+    const at = edgePoint(BOSS_KINDS.includes(kind) ? 420 : 300);
     e.active = true;
     e.kind = kind;
     e.x = at.x;
@@ -208,12 +228,27 @@ export function createWorld(random) {
     e.orbTimer = 0;
     e.flash = 0;
     e.mode = 'chase';
-    e.modeTimer = def.chargeInterval ?? 0;
+    e.modeTimer = def.chargeInterval ?? def.dashCooldown ?? 0;
     e.spawnTimer = def.spawnInterval ?? 0;
     e.wanderX = at.x;
     e.wanderY = at.y;
     e.wanderTimer = 0;
-    if (kind === KIND_BOSS) state.bossActive = true;
+    e.burnTimer = 0;
+    e.burnTick = 0;
+    e.spreadTimer = 0;
+    if (BOSS_KINDS.includes(kind)) state.bossActive = true;
+    return e;
+  }
+
+  /**
+   * Spawn a foe at an exact spot instead of the arena's edge: splitter children burst
+   * out of their parent, and the Tyrant's minions crawl out of the ground beside it.
+   */
+  function spawnEnemyAt(kind, x, y) {
+    const e = spawnEnemy(kind);
+    if (!e) return null;
+    e.x = Math.min(FIELD.width - e.radius, Math.max(e.radius, x));
+    e.y = Math.min(FIELD.height - e.radius, Math.max(e.radius, y));
     return e;
   }
 
@@ -226,14 +261,23 @@ export function createWorld(random) {
     for (let i = 0; i < wave.mites; i += 1) state.spawnQueue.push(KIND_MITE);
     for (let i = 0; i < wave.brutes; i += 1) state.spawnQueue.push(KIND_BRUTE);
     for (let i = 0; i < wave.spitters; i += 1) state.spawnQueue.push(KIND_SPITTER);
-    // Shuffle the queue; the Tyrant always comes last.
+    for (let i = 0; i < wave.dashers; i += 1) state.spawnQueue.push(KIND_DASHER);
+    for (let i = 0; i < wave.splitters; i += 1) state.spawnQueue.push(KIND_SPLITTER);
+    // Shuffle the queue; a big foe always comes last.
     for (let i = state.spawnQueue.length - 1; i > 0; i -= 1) {
       const j = Math.floor(random() * (i + 1));
       const tmp = state.spawnQueue[i];
       state.spawnQueue[i] = state.spawnQueue[j];
       state.spawnQueue[j] = tmp;
     }
-    if (wave.boss) state.spawnQueue.push(KIND_BOSS);
+    if (wave.miniboss) state.spawnQueue.push(KIND_TYRANTLING);
+    if (wave.boss) {
+      // The Tyrant does not wait for the last straggler: it wakes a little past the
+      // middle of the queue, so its minions keep pouring in around the boss fight
+      // instead of the arena standing empty while the warden duels it alone.
+      const at = Math.floor(state.spawnQueue.length * 0.55);
+      state.spawnQueue.splice(at, 0, KIND_BOSS);
+    }
     state.spawnTimer = 0.6;
   }
 
@@ -287,6 +331,7 @@ export function createWorld(random) {
     for (const b of ebullets) b.active = false;
     for (const p of particles) p.active = false;
     for (const n of numbers) n.active = false;
+    fire.reset();
     state.elapsed = 0;
     state.score = 0;
     state.kills = 0;
@@ -302,6 +347,7 @@ export function createWorld(random) {
     state.orbAngle = 0;
     state.shake = 0;
     state.bossActive = false;
+    state.titleFireTimer = 0;
     buildDecor();
     startWave(1);
   }
@@ -329,14 +375,24 @@ export function createWorld(random) {
     state.kills += 1;
     state.score += e.score;
     const def = ENEMY[e.kind];
-    burst(e.x, e.y, def.glow, e.kind === KIND_BOSS ? 40 : 12, e.kind === KIND_BOSS ? 260 : 170);
-    burst(e.x, e.y, '#ff5a2e', e.kind === KIND_BOSS ? 24 : 6, 120);
+    burst(e.x, e.y, def.glow, BOSS_KINDS.includes(e.kind) ? 40 : 12, BOSS_KINDS.includes(e.kind) ? 260 : 170);
+    burst(e.x, e.y, '#ff5a2e', BOSS_KINDS.includes(e.kind) ? 24 : 6, 120);
     spawnGem(e.x, e.y, 'ember', e.xp);
-    if (e.kind !== KIND_BOSS && random() < HEART_CHANCE) spawnGem(e.x, e.y, 'heart', HEART_HEAL);
-    if (e.kind === KIND_BOSS) {
+    if (!BOSS_KINDS.includes(e.kind) && random() < HEART_CHANCE) spawnGem(e.x, e.y, 'heart', HEART_HEAL);
+    // A foe that dies alight leaves the floor burning where it fell.
+    if (e.burnTimer > 0) {
+      fire.igniteGround(e.x, e.y, stats.fireRadius, stats.fireDuration, random);
+    }
+    // A splitter bursts into mites when it dies — the horde grows from its own dead.
+    if (e.kind === KIND_SPLITTER) {
+      for (let i = 0; i < ENEMY.splitter.children; i += 1) {
+        spawnEnemyAt(KIND_MITE, e.x + (random() - 0.5) * 44, e.y + (random() - 0.5) * 44);
+      }
+    }
+    if (BOSS_KINDS.includes(e.kind)) {
       state.bossActive = false;
       state.shake = 18;
-      ring(e.x, e.y, '#ff2e63', 320);
+      ring(e.x, e.y, def.glow, 320);
     }
     return true;
   }
@@ -418,39 +474,70 @@ export function createWorld(random) {
             b.radius = 7;
           }
         }
-      } else if (e.kind === KIND_BOSS) {
+      } else if (e.kind === KIND_DASHER) {
+        // Dashers stalk slowly, then — inside range, off cooldown — telegraph a line
+        // and lunge at the warden's position. The telegraph is the dodge window.
+        const def = ENEMY.dasher;
+        e.modeTimer -= dt;
+        if (e.mode === 'chase') {
+          e.x += ux * e.speed * dt;
+          e.y += uy * e.speed * dt;
+          if (e.modeTimer <= 0 && d < def.dashRange) {
+            e.mode = 'telegraph';
+            e.modeTimer = def.dashTelegraph;
+            e.chargeX = ux;
+            e.chargeY = uy;
+          }
+        } else if (e.mode === 'telegraph') {
+          if (e.modeTimer <= 0) {
+            e.mode = 'dash';
+            e.modeTimer = def.dashTime;
+          }
+        } else if (e.mode === 'dash') {
+          e.x += e.chargeX * def.dashSpeed * dt;
+          e.y += e.chargeY * def.dashSpeed * dt;
+          if (e.modeTimer <= 0) {
+            e.mode = 'recover';
+            e.modeTimer = 0.5;
+          }
+        } else if (e.mode === 'recover') {
+          if (e.modeTimer <= 0) {
+            e.mode = 'chase';
+            e.modeTimer = def.dashCooldown;
+          }
+        }
+      } else if (BOSS_KINDS.includes(e.kind)) {
+        // The Tyrantling and the Ash Tyrant share one mind: chase, spawn mites, and
+        // telegraph a charge. Only the numbers differ (see ENEMY in config.js).
+        const def = ENEMY[e.kind];
         e.modeTimer -= dt;
         e.spawnTimer -= dt;
         if (e.mode === 'chase') {
           e.x += ux * e.speed * dt;
           e.y += uy * e.speed * dt;
           if (e.spawnTimer <= 0) {
-            e.spawnTimer = ENEMY.boss.spawnInterval;
+            e.spawnTimer = def.spawnInterval;
             let alive = 0;
             for (const other of enemies) if (other.active && other.kind === KIND_MITE) alive += 1;
-            for (let i = 0; i < 3 && alive < 8; i += 1) {
-              const mite = spawnEnemy(KIND_MITE);
-              if (mite) {
-                mite.x = e.x + (random() - 0.5) * 90;
-                mite.y = e.y + (random() - 0.5) * 90;
-                alive += 1;
-              }
+            for (let i = 0; i < 4 && alive < 12; i += 1) {
+              const mite = spawnEnemyAt(KIND_MITE, e.x + (random() - 0.5) * 90, e.y + (random() - 0.5) * 90);
+              if (mite) alive += 1;
             }
           }
           if (e.modeTimer <= 0 && d > 160) {
             e.mode = 'telegraph';
-            e.modeTimer = ENEMY.boss.telegraphTime;
+            e.modeTimer = def.telegraphTime;
             e.chargeX = ux;
             e.chargeY = uy;
           }
         } else if (e.mode === 'telegraph') {
           if (e.modeTimer <= 0) {
             e.mode = 'charge';
-            e.modeTimer = ENEMY.boss.chargeTime;
+            e.modeTimer = def.chargeTime;
           }
         } else if (e.mode === 'charge') {
-          e.x += e.chargeX * ENEMY.boss.chargeSpeed * dt;
-          e.y += e.chargeY * ENEMY.boss.chargeSpeed * dt;
+          e.x += e.chargeX * def.chargeSpeed * dt;
+          e.y += e.chargeY * def.chargeSpeed * dt;
           if (e.modeTimer <= 0) {
             e.mode = 'recover';
             e.modeTimer = 0.6;
@@ -458,11 +545,11 @@ export function createWorld(random) {
         } else if (e.mode === 'recover') {
           if (e.modeTimer <= 0) {
             e.mode = 'chase';
-            e.modeTimer = ENEMY.boss.chargeInterval;
+            e.modeTimer = def.chargeInterval;
           }
         }
       } else {
-        // Mites and brutes chase the warden.
+        // Mites, brutes and splitters chase the warden.
         e.x += ux * e.speed * dt;
         e.y += uy * e.speed * dt;
       }
@@ -510,6 +597,15 @@ export function createWorld(random) {
       b.x += b.vx * dt;
       b.y += b.vy * dt;
       if (b.x < -20 || b.x > FIELD.width + 20 || b.y < -20 || b.y > FIELD.height + 20) {
+        // A bolt that dies on the arena wall kindles the floor where it struck — the
+        // warden's stray fire rings the edges where the horde pours in.
+        if (random() < GROUNDFIRE.wallIgniteChance) {
+          fire.igniteGround(
+            Math.min(FIELD.width - 10, Math.max(10, b.x)),
+            Math.min(FIELD.height - 10, Math.max(10, b.y)),
+            stats.fireRadius * 0.8, stats.fireDuration, random,
+          );
+        }
         b.active = false;
         continue;
       }
@@ -519,6 +615,10 @@ export function createWorld(random) {
         if (dist2(b.x, b.y, e.x, e.y) < rr * rr) {
           const died = damageEnemy(e, b.damage);
           burst(b.x, b.y, '#ffb347', 4, 90);
+          // Kindled Ground: a bolt that strikes a foe sets the floor alight under it.
+          if (random() < GROUNDFIRE.igniteChance) {
+            fire.igniteGround(b.x, b.y, stats.fireRadius, stats.fireDuration, random);
+          }
           if (died) {
             events |= EVENT_KILL;
             if (e.kind === KIND_BOSS) events |= EVENT_VICTORY;
@@ -616,6 +716,11 @@ export function createWorld(random) {
         p.y += p.vy * dt;
         p.vx *= 0.94;
         p.vy *= 0.94;
+      } else if (p.kind === 'rise') {
+        // Title embers drift upward, swaying side to side as they climb.
+        p.x += (p.vx + Math.sin(state.elapsed * 2 + p.y * 0.05) * 8) * dt;
+        p.y += p.vy * dt;
+        if (p.y < -10) p.active = false;
       }
     }
     for (const n of numbers) {
@@ -684,10 +789,24 @@ export function createWorld(random) {
     if (player.hurtFlash > 0) player.hurtFlash -= dt;
 
     if (mode === 'title') {
-      // A few mites drift around the arena as a living backdrop.
+      // The title backdrop is a living arena, not a void: a crowd of foes wanders the
+      // hall, ground-fire kindles in patches behind the panel, and embers rise from the
+      // floor. The warden stands at the arena's edge, in sight beside the title panel.
+      player.x = 170;
+      player.y = 380;
+      player.aimX = 1;
+      player.aimY = 0;
       let count = 0;
       for (const e of enemies) if (e.active) count += 1;
-      if (count < 6 && random() < dt * 1.2) spawnEnemy(random() < 0.8 ? KIND_MITE : KIND_BRUTE);
+      if (count < TITLE_FOES && random() < dt * TITLE_SPAWN_RATE) {
+        const roll = random();
+        const kind = roll < 0.5 ? KIND_MITE
+          : roll < 0.65 ? KIND_BRUTE
+          : roll < 0.78 ? KIND_SPITTER
+          : roll < 0.89 ? KIND_DASHER
+          : KIND_SPLITTER;
+        spawnEnemy(kind);
+      }
       for (const e of enemies) {
         if (!e.active) continue;
         e.wanderTimer -= dt;
@@ -695,12 +814,45 @@ export function createWorld(random) {
           e.wanderTimer = 1.5 + random() * 2;
           e.wanderX = 80 + random() * (FIELD.width - 160);
           e.wanderY = 80 + random() * (FIELD.height - 160);
+          // Keep the crowd where it can be seen: a wander target behind the title panel
+          // slides out to the nearest side margin instead.
+          if (e.wanderX > 310 && e.wanderX < 970 && e.wanderY > 140 && e.wanderY < 580) {
+            e.wanderX = e.wanderX < FIELD.width / 2 ? 110 + random() * 200 : 970 + random() * 200;
+          }
         }
         const dx = e.wanderX - e.x;
         const dy = e.wanderY - e.y;
         const d = Math.hypot(dx, dy) || 1;
         e.x += (dx / d) * e.speed * 0.35 * dt;
         e.y += (dy / d) * e.speed * 0.35 * dt;
+      }
+      // Ground-fire kindles on its own behind the panel; the wandering foes are scenery
+      // and do not burn, so only the patches decay here.
+      state.titleFireTimer -= dt;
+      if (state.titleFireTimer <= 0) {
+        state.titleFireTimer = TITLE_FIRE_SECONDS;
+        fire.igniteGround(
+          80 + random() * (FIELD.width - 160),
+          80 + random() * (FIELD.height - 160),
+          1, 1, random,
+        );
+      }
+      fire.decayPatches(dt);
+      // Embers rise from the floor in a slow, steady drift.
+      if (random() < dt * 9) {
+        const p = free(particles);
+        if (p) {
+          p.active = true;
+          p.kind = 'rise';
+          p.x = 40 + random() * (FIELD.width - 80);
+          p.y = FIELD.height - 20 - random() * 120;
+          p.vx = (random() - 0.5) * 12;
+          p.vy = -(18 + random() * 26);
+          p.maxLife = 2.5 + random() * 2;
+          p.life = p.maxLife;
+          p.size = 1.5 + random() * 2;
+          p.color = random() < 0.5 ? '#ffb347' : '#ff7a2e';
+        }
       }
       updateParticles(dt);
       return events;
@@ -761,6 +913,15 @@ export function createWorld(random) {
     events |= updateEbullets(dt);
     if (state.over) return events;
     events |= updateNovaAndOrbs(dt);
+    // Kindled Ground: the floor burns, foes standing in the flames catch alight, and
+    // burning foes trail fire behind them. A foe the fire finishes counts as a kill,
+    // and the Tyrant burning to death is still a victory.
+    let fireEvents = 0;
+    fire.updateGroundFire(dt, enemies, damageEnemy, (e) => {
+      fireEvents |= EVENT_KILL;
+      if (e.kind === KIND_BOSS) fireEvents |= EVENT_VICTORY;
+    }, random, stats);
+    events |= fireEvents;
     updateParticles(dt);
     return events;
   }
