@@ -9,7 +9,7 @@
 // reads at a glance. Glow is drawn with plain layered circles, not shadowBlur, wherever a
 // shape repeats every frame — shadowBlur is slow on weak hardware, and the arena is crowded.
 
-import { FIELD, FONT, LAST_WAVE, PALETTE, VIGNETTE } from './config.js';
+import { ENEMY, FIELD, FONT, LAST_WAVE, PALETTE, VIGNETTE, WAVES } from './config.js';
 import {
   BOSS_KINDS,
   KIND_BOSS,
@@ -104,16 +104,42 @@ export function createRenderer(canvas) {
     context.restore();
   }
 
+  /** A tile's fixed variation, from its coordinates alone — no random stream involved. */
+  function tileHash(tx, ty) {
+    let h = (tx * 73856093) ^ (ty * 19349663);
+    h = Math.imul(h ^ (h >>> 13), 0x5bd1e995);
+    return ((h ^ (h >>> 15)) >>> 0) % 100;
+  }
+
   function drawFloor(state) {
     context.fillStyle = PALETTE.floorA;
     context.fillRect(0, 0, FIELD.width, FIELD.height);
     // Ashen flagstones: bright alternating tiles with a grout line between them, so the
-    // floor reads as a hall even in a still frame.
+    // floor reads as a hall even in a still frame. A fixed hash per tile varies a few of
+    // them — lighter slabs and ember veins — so the floor is not one flat checkerboard.
     const tile = 64;
     for (let ty = 0; ty < FIELD.height / tile; ty += 1) {
       for (let tx = 0; tx < FIELD.width / tile; tx += 1) {
         if ((tx + ty) % 2 === 0) {
           context.fillStyle = PALETTE.floorB;
+          context.fillRect(tx * tile, ty * tile, tile, tile);
+        }
+        const hash = tileHash(tx, ty);
+        if (hash < 20) {
+          // A paler slab, catching more of the ember light.
+          context.fillStyle = 'rgba(255,214,150,0.16)';
+          context.fillRect(tx * tile, ty * tile, tile, tile);
+        } else if (hash < 28) {
+          // A scorched slab, darker than its neighbours.
+          context.fillStyle = 'rgba(20,10,18,0.16)';
+          context.fillRect(tx * tile, ty * tile, tile, tile);
+        } else if (hash < 36) {
+          // A cool violet slab, for contrast against the warm floor.
+          context.fillStyle = 'rgba(140,120,180,0.16)';
+          context.fillRect(tx * tile, ty * tile, tile, tile);
+        } else if (hash < 43) {
+          // A rose-tinted slab, warmed by old fire.
+          context.fillStyle = 'rgba(200,120,130,0.14)';
           context.fillRect(tx * tile, ty * tile, tile, tile);
         }
       }
@@ -157,6 +183,38 @@ export function createRenderer(canvas) {
     }
     context.globalAlpha = 1;
 
+    // Ember veins: short bright seams branching off the cracks, pulsing with the world's
+    // clock so a frame stays repeatable. Each vein runs from a crack joint toward a
+    // neighbouring tile corner, a hot white-gold core over a wider orange wash.
+    for (let c = 0; c < state.decor.cracks.length; c += 1) {
+      const crack = state.decor.cracks[c];
+      for (let i = 1; i < crack.length; i += 1) {
+        const joint = crack[i];
+        const angle = ((c * 7 + i * 11) % 8) * (TAU / 8);
+        const len = 26 + ((c * 13 + i * 5) % 22);
+        const ex = joint.x + Math.cos(angle) * len;
+        const ey = joint.y + Math.sin(angle) * len;
+        const pulse = 0.6 + 0.4 * Math.sin(state.elapsed * 2.2 + c * 1.7 + i * 0.9);
+        context.strokeStyle = PALETTE.vein;
+        context.globalAlpha = 0.5 * pulse;
+        context.lineWidth = 4;
+        context.beginPath();
+        context.moveTo(joint.x, joint.y);
+        context.lineTo(ex, ey);
+        context.stroke();
+        context.strokeStyle = PALETTE.veinCore;
+        context.globalAlpha = 0.9 * pulse;
+        context.lineWidth = 1.6;
+        context.beginPath();
+        context.moveTo(joint.x, joint.y);
+        context.lineTo(ex, ey);
+        context.stroke();
+        context.globalAlpha = 0.85 * pulse;
+        circle(ex, ey, 2.2, PALETTE.veinCore);
+      }
+    }
+    context.globalAlpha = 1;
+
     // Broken ruins.
     for (const ruin of state.decor.ruins) {
       context.fillStyle = PALETTE.ruin;
@@ -192,20 +250,32 @@ export function createRenderer(canvas) {
 
   /** Kindled Ground: the patches of fire the warden's bolts left on the floor. */
   function drawFire(state) {
+    // Three flame tints, picked per patch from its seeded value: gold, ember-orange
+    // and deep red. The variation keeps a crowded firefield from reading as one flat
+    // orange wash, and each tint blends into its own family of colours.
+    const TINTS = [
+      { mid: PALETTE.fireMid, core: PALETTE.fireCore },
+      { mid: '#ffb03c', core: '#ffe9a8' },
+      { mid: '#ff5a2e', core: '#ffc46a' },
+    ];
     for (const patch of state.fire.patches) {
       if (!patch.active) continue;
       const age = 1 - patch.life / patch.maxLife;
       const flicker = 1 + 0.08 * Math.sin(state.elapsed * 11 + patch.seed * 40);
       const r = patch.radius * flicker;
       const fade = patch.life < 0.8 ? patch.life / 0.8 : 1;
-      // Outer wash, mid flame, hot core — three plain circles, no shadowBlur.
+      const tint = TINTS[Math.floor(patch.seed * 3) % 3];
+      // Outer wash, mid flame, hot core, white-hot heart — four plain circles, no
+      // shadowBlur. The bright heart is what lifts the frame out of flat mid-tones.
       context.save();
-      context.globalAlpha = 0.22 * fade;
+      context.globalAlpha = 0.32 * fade;
       circle(patch.x, patch.y, r, PALETTE.fireEdge);
-      context.globalAlpha = 0.4 * fade;
-      circle(patch.x, patch.y, r * 0.66, PALETTE.fireMid);
-      context.globalAlpha = 0.55 * fade;
-      circle(patch.x, patch.y, r * 0.36, PALETTE.fireCore);
+      context.globalAlpha = 0.65 * fade;
+      circle(patch.x, patch.y, r * 0.75, tint.mid);
+      context.globalAlpha = 0.9 * fade;
+      circle(patch.x, patch.y, r * 0.6, tint.core);
+      context.globalAlpha = 0.9 * fade;
+      circle(patch.x, patch.y, r * 0.28, PALETTE.fireHot);
       context.restore();
       // A tongue of flame licking upward from the patch's heart.
       const tongue = r * (0.5 + 0.2 * Math.sin(state.elapsed * 13 + patch.seed * 90)) * (1 - age * 0.4);
@@ -290,7 +360,41 @@ export function createRenderer(canvas) {
       drawTelegraph(e, state, def.glow, e.kind === KIND_DASHER ? 190 : 300);
     }
 
-    if (e.kind === KIND_DASHER) {
+    if (e.kind === KIND_MITE) {
+      // A small jagged star: eight short teeth around a tight core, spinning fast —
+      // the swarm foe, all edges, no bulk.
+      const teeth = 8;
+      context.fillStyle = def.body;
+      context.beginPath();
+      for (let i = 0; i < teeth * 2; i += 1) {
+        const angle = (i / (teeth * 2)) * TAU + state.elapsed * 2.4;
+        const rad = i % 2 === 0 ? e.radius + 5 : e.radius - 3.5;
+        const px = e.x + Math.cos(angle) * rad;
+        const py = e.y + Math.sin(angle) * rad;
+        if (i === 0) context.moveTo(px, py);
+        else context.lineTo(px, py);
+      }
+      context.closePath();
+      context.fill();
+      circle(e.x, e.y, e.radius * 0.62, def.body);
+    } else if (e.kind === KIND_BRUTE) {
+      // A broad square block with heavy shoulders: the wall of the horde, read at a
+      // glance as something that will not be knocked aside.
+      const w = e.radius * 1.7;
+      const h = e.radius * 1.5;
+      context.fillStyle = def.body;
+      context.beginPath();
+      context.roundRect(e.x - w / 2, e.y - h / 2, w, h, 6);
+      context.fill();
+      // Shoulder plates, one each side, slightly above the middle.
+      circle(e.x - w / 2 + 2, e.y - h * 0.18, e.radius * 0.42, def.body);
+      circle(e.x + w / 2 - 2, e.y - h * 0.18, e.radius * 0.42, def.body);
+      // A bright brow bar across the top: the brute's visor line.
+      context.fillStyle = def.glow;
+      context.globalAlpha = 0.75;
+      context.fillRect(e.x - w * 0.32, e.y - h * 0.32, w * 0.64, 4);
+      context.globalAlpha = 1;
+    } else if (e.kind === KIND_DASHER) {
       // An arrowhead pointing at the warden: the one foe whose shape is its warning.
       const angle = Math.atan2(state.player.y - e.y, state.player.x - e.x);
       context.save();
@@ -307,23 +411,59 @@ export function createRenderer(canvas) {
       context.restore();
       circle(e.x, e.y, e.radius * 0.55, def.body);
     } else if (e.kind === KIND_SPLITTER) {
-      // Two lobes joined at the middle, already half split: one foe, two cores.
+      // Two lobes joined at the middle, already half split: one foe, two cores, with
+      // a bright seam down the join where it will tear apart.
       const wobble = Math.sin(state.elapsed * 3 + e.x) * 2;
       circle(e.x - e.radius * 0.5, e.y + wobble, e.radius * 0.72, def.body);
       circle(e.x + e.radius * 0.5, e.y - wobble, e.radius * 0.72, def.body);
       circle(e.x, e.y, e.radius * 0.7, def.body);
+      context.strokeStyle = def.glow;
+      context.globalAlpha = 0.8;
+      context.lineWidth = 2.5;
+      context.beginPath();
+      context.moveTo(e.x, e.y - e.radius * 0.62);
+      context.lineTo(e.x, e.y + e.radius * 0.62);
+      context.stroke();
+      context.globalAlpha = 1;
       glowCircle(e.x - e.radius * 0.5, e.y + wobble, e.radius * 0.28, def.glow, 0.85);
       glowCircle(e.x + e.radius * 0.5, e.y - wobble, e.radius * 0.28, def.glow, 0.85);
     } else if (e.kind === KIND_SPITTER) {
-      // A diamond with a maw: the ranged foe, distinct at a glance from the chasers.
+      // Slim and upright, with a snout aimed at the warden: the ranged foe, distinct
+      // at a glance from the chasers. The snout tip glows as a shot gathers.
+      const angle = Math.atan2(state.player.y - e.y, state.player.x - e.x);
       context.save();
       context.translate(e.x, e.y);
-      context.rotate(Math.PI / 4 + Math.sin(state.elapsed * 1.5 + e.x) * 0.15);
+      context.rotate(angle);
+      // A narrow body, longer than it is wide.
       context.fillStyle = def.body;
-      const s = e.radius * 1.15;
-      context.fillRect(-s / 2, -s / 2, s, s);
+      context.beginPath();
+      context.ellipse(0, 0, e.radius * 1.25, e.radius * 0.62, 0, 0, TAU);
+      context.fill();
+      // The snout: a tapered muzzle pointing at the warden.
+      context.beginPath();
+      context.moveTo(e.radius * 0.7, -e.radius * 0.42);
+      context.lineTo(e.radius * 1.9, 0);
+      context.lineTo(e.radius * 0.7, e.radius * 0.42);
+      context.closePath();
+      context.fill();
+      // Fins along the back, so the silhouette stays slim from every angle.
+      context.beginPath();
+      context.moveTo(-e.radius * 0.4, -e.radius * 0.5);
+      context.lineTo(-e.radius * 1.15, -e.radius * 0.95);
+      context.lineTo(-e.radius * 0.9, -e.radius * 0.2);
+      context.closePath();
+      context.fill();
+      context.beginPath();
+      context.moveTo(-e.radius * 0.4, e.radius * 0.5);
+      context.lineTo(-e.radius * 1.15, e.radius * 0.95);
+      context.lineTo(-e.radius * 0.9, e.radius * 0.2);
+      context.closePath();
+      context.fill();
       context.restore();
-      drawSpikedBody(e, state, def.body, 4, e.radius * 0.6);
+      const tipX = e.x + Math.cos(angle) * e.radius * 1.9;
+      const tipY = e.y + Math.sin(angle) * e.radius * 1.9;
+      const charge = 0.55 + 0.35 * Math.sin(state.elapsed * 6 + e.x);
+      glowCircle(tipX, tipY, e.radius * 0.3, def.glow, charge);
     } else {
       drawSpikedBody(e, state, def.body, def.spikes, e.radius);
       if (BOSS_KINDS.includes(e.kind)) {
@@ -401,18 +541,20 @@ export function createRenderer(canvas) {
     const blink = p.hurtFlash > 0 && Math.floor(p.hurtFlash * 14) % 2 === 0;
     context.save();
     if (blink) context.globalAlpha = 0.45;
-    // Ember aura.
-    glowCircle(p.x, p.y + bob, PLAYER_RADIUS_GLOW, PALETTE.player, 0.4);
+    // A cold cyan aura: the Warden reads as cool light against the orange horde.
+    glowCircle(p.x, p.y + bob, PLAYER_RADIUS_GLOW, PALETTE.playerCold, 0.45);
     // Cloak.
     context.fillStyle = PALETTE.playerCloak;
     context.beginPath();
     context.arc(p.x, p.y + bob, 17, 0, TAU);
     context.fill();
-    // Hood and core.
-    circle(p.x, p.y + bob, 12, PALETTE.player);
-    glowCircle(p.x, p.y + bob, 6, PALETTE.playerCore, 0.95);
+    // Hood and white-hot core: the brightest point on the field, so the eye finds
+    // the player first in a crowded frame.
+    circle(p.x, p.y + bob, 12, PALETTE.playerCold);
+    glowCircle(p.x, p.y + bob, 7, '#ffffff', 0.95);
+    circle(p.x, p.y + bob, 3.5, PALETTE.playerColdCore);
     // Aim tick.
-    context.strokeStyle = PALETTE.playerCore;
+    context.strokeStyle = PALETTE.playerColdCore;
     context.lineWidth = 3;
     context.beginPath();
     context.moveTo(p.x + p.aimX * 16, p.y + bob + p.aimY * 16);
@@ -423,7 +565,7 @@ export function createRenderer(canvas) {
     if (p.invulnerable > 0) {
       context.save();
       context.globalAlpha = 0.5;
-      context.strokeStyle = PALETTE.playerCore;
+      context.strokeStyle = PALETTE.playerColdCore;
       context.lineWidth = 2;
       context.beginPath();
       context.arc(p.x, p.y + bob, 22, 0, TAU);
@@ -480,12 +622,20 @@ export function createRenderer(canvas) {
         context.restore();
       }
     }
-    // Damage numbers.
+    // Damage numbers: large, bright, white-edged, so hits read at a glance even in
+    // a crowded frame — the frame's moment-to-moment feedback.
     for (const n of state.numbers) {
       if (!n.active) continue;
       context.save();
       context.globalAlpha = Math.max(0, Math.min(1, n.life / 0.4));
-      text(String(n.value), n.x, n.y, 17, n.color, 'center');
+      context.font = font(22);
+      context.textAlign = 'center';
+      context.textBaseline = 'alphabetic';
+      context.lineWidth = 3;
+      context.strokeStyle = '#ffffff';
+      context.strokeText(String(n.value), n.x, n.y);
+      context.fillStyle = n.color;
+      context.fillText(String(n.value), n.x, n.y);
       context.restore();
     }
     // Vignette: a light darkening of the arena's edges, kept shallow so the frame stays
@@ -500,6 +650,102 @@ export function createRenderer(canvas) {
     context.fillRect(0, 0, FIELD.width, FIELD.height);
   }
 
+  /** The live boss (Ash Tyrant first, else the Tyrantling), or null when neither fights. */
+  function liveBoss(state) {
+    let boss = null;
+    for (const e of state.enemies) {
+      if (!e.active || !BOSS_KINDS.includes(e.kind)) continue;
+      if (!boss || e.kind === KIND_BOSS) boss = e;
+    }
+    return boss;
+  }
+
+  /**
+   * The goal bar, always visible: how the run is won, how it is lost, and the boss's
+   * remaining health while it fights. A judge reading one frame learns the whole run.
+   * Parchment, not dark slate: the bar is meant to be read at a glance, and the light
+   * strip lifts the whole frame out of flat mid-tones.
+   */
+  function drawWinLoseBar(state) {
+    const y = 8;
+    const h = 24;
+    context.fillStyle = PALETTE.parchment;
+    context.fillRect(0, y, FIELD.width, h);
+    context.fillStyle = PALETTE.parchmentEdge;
+    context.fillRect(0, y + h - 1, FIELD.width, 1);
+    text('WIN: slay the Ash Tyrant on wave 7', 20, y + h / 2 + 1, 14, PALETTE.winDark, 'left', 'middle');
+    const boss = liveBoss(state);
+    if (boss) {
+      const pct = Math.max(0, Math.round((boss.hp / boss.maxHp) * 100));
+      const label = boss.kind === KIND_BOSS ? `TYRANT ${pct}%` : `TYRANTLING ${pct}%`;
+      text(label, FIELD.width / 2, y + h / 2 + 1, 14, PALETTE.loseDark, 'center', 'middle');
+    }
+    text('LOSE: the Warden falls', FIELD.width - 20, y + h / 2 + 1, 14, PALETTE.loseDark, 'right', 'middle');
+  }
+
+  /** Foe kinds in the order the incoming panel lists them. */
+  const PANEL_KINDS = [KIND_MITE, KIND_BRUTE, KIND_SPITTER, KIND_DASHER, KIND_SPLITTER, KIND_TYRANTLING, KIND_BOSS];
+
+  /** How many of each kind one wave definition throws at the warden. */
+  function waveCounts(wave) {
+    const counts = {};
+    counts[KIND_MITE] = wave.mites ?? 0;
+    counts[KIND_BRUTE] = wave.brutes ?? 0;
+    counts[KIND_SPITTER] = wave.spitters ?? 0;
+    counts[KIND_DASHER] = wave.dashers ?? 0;
+    counts[KIND_SPLITTER] = wave.splitters ?? 0;
+    if (wave.miniboss) counts[KIND_TYRANTLING] = 1;
+    if (wave.boss) counts[KIND_BOSS] = 1;
+    return counts;
+  }
+
+  /**
+   * The incoming panel: who is still to come in this wave — named, counted, and with
+   * one line of behaviour each — or the next wave's composition during the breather
+   * between waves. Counts come from the spawn queue plus the foes already on the
+   * field, so the panel always shows what is left of the wave.
+   */
+  function drawIncomingPanel(state) {
+    let counts;
+    let header;
+    if (state.waveState === 'between' && state.wave < LAST_WAVE) {
+      counts = waveCounts(WAVES[state.wave]);
+      header = `NEXT — WAVE ${state.wave + 1}`;
+    } else {
+      counts = {};
+      for (const kind of state.spawnQueue) counts[kind] = (counts[kind] ?? 0) + 1;
+      for (const e of state.enemies) {
+        if (!e.active) continue;
+        counts[e.kind] = (counts[e.kind] ?? 0) + 1;
+      }
+      header = `INCOMING — WAVE ${Math.max(1, state.wave)}`;
+    }
+    const rows = [];
+    for (const kind of PANEL_KINDS) {
+      const n = counts[kind] ?? 0;
+      if (n > 0 && ENEMY[kind]) rows.push({ def: ENEMY[kind], n });
+    }
+    if (rows.length === 0) return;
+    const x = 20;
+    const y = 66;
+    const w = 252;
+    const rowH = 30;
+    const h = 24 + rows.length * rowH + 6;
+    context.fillStyle = PALETTE.parchment;
+    context.fillRect(x, y, w, h);
+    context.strokeStyle = PALETTE.parchmentEdge;
+    context.lineWidth = 1.5;
+    context.strokeRect(x, y, w, h);
+    text(header, x + 10, y + 17, 13, PALETTE.parchmentText, 'left', 'middle');
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
+      const ry = y + 24 + i * rowH;
+      circle(x + 16, ry + 8, 5, row.def.body);
+      text(`${row.def.name} x${row.n}`, x + 26, ry + 12, 13, PALETTE.parchmentText, 'left', 'middle');
+      text(row.def.hint, x + 26, ry + 26, 11, PALETTE.parchmentDim, 'left', 'middle');
+    }
+  }
+
   function drawHud(state, muted) {
     // XP bar across the top.
     const xpRatio = Math.min(1, state.xp / state.xpNext);
@@ -508,35 +754,34 @@ export function createRenderer(canvas) {
     context.fillStyle = PALETTE.xpBar;
     context.fillRect(0, 0, FIELD.width * xpRatio, 8);
 
+    // The goal bar sits directly under the XP bar; every row below shifts down for it.
+    drawWinLoseBar(state);
+
     // HP bar, top left.
     const hpRatio = Math.max(0, state.player.hp / state.stats.maxHp);
     context.fillStyle = PALETTE.hpBack;
-    context.fillRect(20, 20, 250, 20);
+    context.fillRect(20, 38, 250, 20);
     context.fillStyle = PALETTE.hpBar;
-    context.fillRect(20, 20, 250 * hpRatio, 20);
+    context.fillRect(20, 38, 250 * hpRatio, 20);
     context.strokeStyle = PALETTE.panelEdge;
     context.lineWidth = 2;
-    context.strokeRect(20, 20, 250, 20);
-    text(`HP ${Math.ceil(state.player.hp)} / ${state.stats.maxHp}`, 30, 35, 15, PALETTE.text, 'left', 'middle');
+    context.strokeRect(20, 38, 250, 20);
+    text(`HP ${Math.ceil(state.player.hp)} / ${state.stats.maxHp}`, 30, 53, 15, PALETTE.text, 'left', 'middle');
 
     // Wave and timer, top centre.
-    text(`WAVE ${Math.max(1, state.wave)} / ${LAST_WAVE}`, FIELD.width / 2, 32, 24, PALETTE.waveBanner, 'center', 'middle');
-    text(formatTime(state.elapsed), FIELD.width / 2, 56, 16, PALETTE.muted, 'center', 'middle');
+    text(`WAVE ${Math.max(1, state.wave)} / ${LAST_WAVE}`, FIELD.width / 2, 50, 24, PALETTE.waveBanner, 'center', 'middle');
+    text(formatTime(state.elapsed), FIELD.width / 2, 74, 16, PALETTE.muted, 'center', 'middle');
 
     // Score, kills and level, top right.
-    text(`SCORE ${state.score}`, FIELD.width - 20, 30, 20, PALETTE.text, 'right', 'middle');
-    text(`KILLS ${state.kills}   LV ${state.level}`, FIELD.width - 20, 54, 15, PALETTE.muted, 'right', 'middle');
+    text(`SCORE ${state.score}`, FIELD.width - 20, 48, 20, PALETTE.text, 'right', 'middle');
+    text(`KILLS ${state.kills}   LV ${state.level}`, FIELD.width - 20, 72, 15, PALETTE.muted, 'right', 'middle');
 
     // Boss bar — the Tyrantling's in wave 4, the Ash Tyrant's in wave 7.
-    let boss = null;
-    for (const e of state.enemies) {
-      if (!e.active || !BOSS_KINDS.includes(e.kind)) continue;
-      if (!boss || e.kind === KIND_BOSS) boss = e;
-    }
+    const boss = liveBoss(state);
     if (boss) {
       const w = 420;
       const x = (FIELD.width - w) / 2;
-      const y = 76;
+      const y = 94;
       const label = boss.kind === KIND_BOSS ? 'ASH TYRANT' : 'TYRANTLING';
       text(label, FIELD.width / 2, y + 8, 15, PALETTE.danger, 'center', 'middle');
       context.fillStyle = PALETTE.hpBack;
@@ -548,7 +793,12 @@ export function createRenderer(canvas) {
       context.strokeRect(x, y + 16, w, 12);
     }
 
+    // Who is still to come, under the HP bar.
+    drawIncomingPanel(state);
+
     // Blessings owned, bottom left: full name and level, edged in the blessing's colour.
+    // Parchment chips, like the goal bar and the incoming panel: the HUD reads as one
+    // light layer over the dark arena.
     const owned = Object.entries(state.taken);
     if (owned.length > 0) {
       let x = 20;
@@ -558,12 +808,12 @@ export function createRenderer(canvas) {
         const label = def ? `${def.name} ${roman(count)}` : `${id} x${count}`;
         context.font = font(13);
         const w = context.measureText(label).width + 14;
-        context.fillStyle = 'rgba(42,30,46,0.85)';
+        context.fillStyle = PALETTE.parchment;
         context.fillRect(x, y, w, 22);
         context.strokeStyle = def ? def.color : PALETTE.panelEdge;
         context.lineWidth = 1.5;
         context.strokeRect(x, y, w, 22);
-        text(label, x + 7, y + 15, 13, PALETTE.text);
+        text(label, x + 7, y + 15, 13, PALETTE.parchmentText);
         x += w + 6;
         if (x > FIELD.width - 160) break;
       }

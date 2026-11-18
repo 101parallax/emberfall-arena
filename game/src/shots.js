@@ -5,7 +5,7 @@
 //
 // The scenes are staged for what the frame must show, not for the earliest moment it can
 // show it: `play` is the Ash Tyrant fight (the boss alive, its bar up, its minions around
-// it, ground-fire burning), and `levelup` is the third blessing choice, when the HUD already
+// it, ground-fire burning), and `levelup` is the sixth blessing choice, when the HUD already
 // shows a build in progress.
 
 import { FIELD, STEP } from './config.js';
@@ -20,8 +20,8 @@ const END_LIMIT_SECONDS = 600;
 const PLAY_LIMIT_SECONDS = 480;
 /** Seconds of boss fight the first staging pass watches while it looks for the best frame. */
 const BOSS_WATCH_SECONDS = 20;
-/** Which level-up the levelup scene stops at (the 3rd choice, around level 4). */
-const LEVELUP_STOP_COUNT = 3;
+/** Which level-up the levelup scene stops at (the 6th choice, around level 7). */
+const LEVELUP_STOP_COUNT = 6;
 
 /** How the autopilot steers: flee foes inside this range, chase embers inside this one. */
 const FLEE_RANGE = 150;
@@ -107,14 +107,34 @@ function liveBoss(state) {
   return null;
 }
 
-/** How busy the boss fight looks on one step: foes first, a telegraphing Tyrant next. */
+/**
+ * How climactic the boss fight looks on one step. The best frame is late in the
+ * fight, not early: the Tyrant low on health (and in its late phase when the world
+ * tracks one — the HP ratio stands in when it does not), telegraphing or charging,
+ * standing in open ground where the camera can see it, with its horde around it.
+ */
 function bossFrameScore(state) {
   const boss = liveBoss(state);
   if (!boss) return -1;
   let foes = 0;
   for (const e of state.enemies) if (e.active) foes += 1;
   const telegraph = boss.mode === 'telegraph' ? 30 : boss.mode === 'charge' ? 15 : 0;
-  return foes * 10 + telegraph + state.fire.activeCount() * 0.5;
+  const hpRatio = boss.hp / boss.maxHp;
+  // A Tyrant below 60% health is a fight nearly won: the later the frame, the better.
+  const lowHp = hpRatio < 0.6 ? (0.6 - hpRatio) * 200 : 0;
+  // Late phase, when the world tracks one; the HP ratio stands in when it does not.
+  const phase = typeof boss.phase === 'number' ? boss.phase : (hpRatio < 0.5 ? 2 : 1);
+  const latePhase = phase >= 2 ? 40 : 0;
+  // Open ground: few ground-fire patches crowding the boss, so the Tyrant reads
+  // against the floor instead of hiding behind its own flames.
+  let nearFire = 0;
+  for (const patch of state.fire.patches) {
+    if (!patch.active) continue;
+    const d = Math.hypot(patch.x - boss.x, patch.y - boss.y);
+    if (d < boss.radius * 3 + patch.radius) nearFire += 1;
+  }
+  const openGround = Math.max(0, 12 - nearFire) * 4;
+  return foes * 10 + telegraph + lowHp + latePhase + openGround + state.fire.activeCount() * 0.5;
 }
 
 /**
@@ -171,8 +191,8 @@ export function stageShot(name, world, freshWorld) {
     return { screen: SCREEN_TITLE, best: 0, world };
   }
   if (name === 'levelup') {
-    // Wait for the third level-up, so the frame shows a mid-run build: wave 3 or so, a
-    // score in the hundreds, and blessing chips already owned. Earlier level-ups are
+    // Wait for the sixth level-up, so the frame shows a mid-run build: wave 4 or so, a
+    // score in the thousands, and blessing chips already owned. Earlier level-ups are
     // spent on the autopilot's picks, like a real player choosing as they go.
     let seen = 0;
     let hit = false;
