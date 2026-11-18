@@ -10,6 +10,10 @@
 import {
   BETWEEN_WAVE_HEAL,
   BETWEEN_WAVE_SECONDS,
+  DEFAULT_DIFFICULTY,
+  DIFFICULTY,
+  ELITE_BRUTE_WAVES,
+  ELITE_HP_MULTIPLIER,
   ENEMY,
   FIELD,
   GROUNDFIRE,
@@ -25,6 +29,7 @@ import {
   xpForLevel,
 } from './config.js';
 import { findUpgrade, rollChoices } from './upgrades.js';
+import { rollRelic } from './relics.js';
 import { createGroundFire } from './groundfire.js';
 
 export const KIND_MITE = 'mite';
@@ -58,7 +63,7 @@ function dist2(ax, ay, bx, by) {
   return dx * dx + dy * dy;
 }
 
-export function createWorld(random) {
+export function createWorld(random, difficulty = DEFAULT_DIFFICULTY) {
   const player = {
     x: FIELD.width / 2, y: FIELD.height / 2, hp: PLAYER.maxHp,
     invulnerable: 0, hurtFlash: 0, fireTimer: 0.3, aimX: 1, aimY: 0,
@@ -74,6 +79,9 @@ export function createWorld(random) {
       // Kindled Ground: burnTimer counts down while a foe is alight, burnTick gathers
       // the time toward the next burn-damage tick, spreadTimer paces the fire it trails.
       burnTimer: 0, burnTick: 0, spreadTimer: 0,
+      // elite: the one brute per relic wave that carries a relic; phase: the Tyrant's
+      // fight phase (1 until half health, 2 after — see the boss branch below).
+      elite: false, phase: 1,
     });
   }
   const bolts = [];
@@ -109,7 +117,29 @@ export function createWorld(random) {
     elapsed: 0, score: 0, kills: 0, level: 1, xp: 0, xpNext: xpForLevel(1),
     choices: null, pendingLevels: 0, taken: {}, victory: false, over: false,
     novaTimer: 6, orbAngle: 0, shake: 0, bossActive: false, titleFireTimer: 0,
+    // The trial this run plays on (see DIFFICULTY in config.js); reset() keeps it, so
+    // a run restarted from the title screen keeps the trial the player chose.
+    difficulty,
+    // Relics carried this run, in the order they were found (relics.js).
+    relics: [],
+    // The dramatic moment on screen, if any: {text, until} in run seconds. Set when the
+    // Tyrant wakes, when it rages into phase 2, and when a relic is found.
+    announce: null,
+    // The run's ledger, for the grade and the feats on the victory screen: damage the
+    // warden took, damage the ground-fire dealt, foes the fire finished, and the lowest
+    // health the run ever saw.
+    damageTaken: 0, fireDamageTotal: 0, foesBurned: 0, lowestHp: PLAYER.maxHp,
+    // How many brutes of this wave are still to spawn: the last one is the wave's
+    // elite (one per relic wave). Counting down to the last brute matters — an elite
+    // that arrives mid-wave soaks the warden's bolts while the horde piles up, and a
+    // run can die for it; the last brute arrives alone, a duel, not a pile-up.
+    eliteBrutesLeft: 0,
   };
+
+  /** The multipliers of the trial this run plays on. */
+  function diff() {
+    return DIFFICULTY[state.difficulty] ?? DIFFICULTY[DEFAULT_DIFFICULTY];
+  }
 
   function freshStats() {
     return {
@@ -124,6 +154,9 @@ export function createWorld(random) {
       orbs: 0, orbDamage: 10, orbRadius: 74,
       // Kindled Ground multipliers, grown by the Wildfire blessing.
       fireRadius: 1, fireDamage: 1, fireDuration: 1,
+      // Relic gifts (relics.js): bolts that pass through foes, a mend at every wave's
+      // end, and embers worth more XP.
+      boltPierce: 0, waveHeal: 0, xpGain: 1,
     };
   }
 
@@ -210,17 +243,18 @@ export function createWorld(random) {
     if (!e) return null;
     const def = ENEMY[kind];
     const at = edgePoint(BOSS_KINDS.includes(kind) ? 420 : 300);
+    const mult = diff();
     e.active = true;
     e.kind = kind;
     e.x = at.x;
     e.y = at.y;
     e.vx = 0;
     e.vy = 0;
-    e.hp = def.hp;
-    e.maxHp = def.hp;
+    e.hp = Math.round(def.hp * mult.hp);
+    e.maxHp = e.hp;
     e.radius = def.radius;
     e.speed = def.speed;
-    e.contact = def.contact;
+    e.contact = Math.round(def.contact * mult.damage);
     e.xp = def.xp;
     e.score = def.score;
     e.touchTimer = 0;
@@ -236,6 +270,18 @@ export function createWorld(random) {
     e.burnTimer = 0;
     e.burnTick = 0;
     e.spreadTimer = 0;
+    e.elite = false;
+    e.phase = 1;
+    // The elite brute: the last brute of a relic wave is twice as hard to kill and
+    // carries a relic (see ELITE_BRUTE_WAVES in config.js).
+    if (kind === KIND_BRUTE && ELITE_BRUTE_WAVES.includes(state.wave)) {
+      state.eliteBrutesLeft -= 1;
+      if (state.eliteBrutesLeft <= 0) {
+        e.elite = true;
+        e.hp *= ELITE_HP_MULTIPLIER;
+        e.maxHp = e.hp;
+      }
+    }
     if (BOSS_KINDS.includes(kind)) state.bossActive = true;
     return e;
   }
@@ -257,6 +303,7 @@ export function createWorld(random) {
     state.wave = n;
     state.waveState = 'banner';
     state.stateTimer = 2.2;
+    state.eliteBrutesLeft = 0;
     state.spawnQueue = [];
     for (let i = 0; i < wave.mites; i += 1) state.spawnQueue.push(KIND_MITE);
     for (let i = 0; i < wave.brutes; i += 1) state.spawnQueue.push(KIND_BRUTE);
@@ -277,6 +324,10 @@ export function createWorld(random) {
       // instead of the arena standing empty while the warden duels it alone.
       const at = Math.floor(state.spawnQueue.length * 0.55);
       state.spawnQueue.splice(at, 0, KIND_BOSS);
+    }
+    // The last brute in the queue is this wave's elite, if the wave has one.
+    if (ELITE_BRUTE_WAVES.includes(n)) {
+      state.eliteBrutesLeft = state.spawnQueue.filter((kind) => kind === KIND_BRUTE).length;
     }
     state.spawnTimer = 0.6;
   }
@@ -348,8 +399,35 @@ export function createWorld(random) {
     state.shake = 0;
     state.bossActive = false;
     state.titleFireTimer = 0;
+    state.relics = [];
+    state.announce = null;
+    state.damageTaken = 0;
+    state.fireDamageTotal = 0;
+    state.foesBurned = 0;
+    state.lowestHp = stats.maxHp;
+    state.eliteBrutesLeft = 0;
     buildDecor();
     startWave(1);
+  }
+
+  /**
+   * Grant one relic from the pool the warden has not yet found, rolled on the seeded
+   * generator, and apply its gift at once. Returns the relic, or null when the warden
+   * already carries the whole set. The find is announced on screen.
+   */
+  function grantRelic() {
+    const def = rollRelic(random, state.relics);
+    if (!def) return null;
+    def.apply(stats);
+    if (def.heal) player.hp = Math.min(stats.maxHp, player.hp + def.heal);
+    state.relics.push(def.id);
+    state.announce = { text: `RELIC FOUND: ${def.name}`, until: state.elapsed + 2 };
+    return def;
+  }
+
+  /** Choose the trial the next run plays on (the title screen's difficulty select). */
+  function setDifficulty(id) {
+    state.difficulty = DIFFICULTY[id] ? id : DEFAULT_DIFFICULTY;
   }
 
   function nearestEnemy() {
@@ -373,7 +451,10 @@ export function createWorld(random) {
     if (e.hp > 0) return false;
     e.active = false;
     state.kills += 1;
-    state.score += e.score;
+    state.score += Math.round(e.score * diff().score);
+    // A relic falls from the Tyrantling, from the Ash Tyrant, and from an elite brute —
+    // the only three ways a relic is ever found (see config.js).
+    if (BOSS_KINDS.includes(e.kind) || e.elite) grantRelic();
     const def = ENEMY[e.kind];
     burst(e.x, e.y, def.glow, BOSS_KINDS.includes(e.kind) ? 40 : 12, BOSS_KINDS.includes(e.kind) ? 260 : 170);
     burst(e.x, e.y, '#ff5a2e', BOSS_KINDS.includes(e.kind) ? 24 : 6, 120);
@@ -393,6 +474,10 @@ export function createWorld(random) {
       state.bossActive = false;
       state.shake = 18;
       ring(e.x, e.y, def.glow, 320);
+      // The Tyrant's death is the victory itself, whichever weapon dealt it — the
+      // wave-clear branch would only catch it once the last minion falls, so the
+      // victory screen would otherwise report the Tyrant unslain.
+      if (e.kind === KIND_BOSS) state.victory = true;
     }
     return true;
   }
@@ -400,6 +485,8 @@ export function createWorld(random) {
   function hurtPlayer(amount) {
     if (player.invulnerable > 0 || state.over) return 0;
     player.hp -= amount;
+    state.damageTaken += amount;
+    state.lowestHp = Math.min(state.lowestHp, player.hp);
     player.invulnerable = PLAYER.invulnerable;
     player.hurtFlash = PLAYER.hurtFlash;
     state.shake = Math.max(state.shake, 9);
@@ -433,7 +520,7 @@ export function createWorld(random) {
       b.vx = Math.cos(angle) * stats.boltSpeed;
       b.vy = Math.sin(angle) * stats.boltSpeed;
       b.damage = stats.boltDamage;
-      b.pierce = 0;
+      b.pierce = stats.boltPierce;
     }
     return EVENT_SHOOT;
   }
@@ -470,7 +557,7 @@ export function createWorld(random) {
             b.y = e.y;
             b.vx = ux * ENEMY.spitter.shotSpeed;
             b.vy = uy * ENEMY.spitter.shotSpeed;
-            b.damage = ENEMY.spitter.shotDamage;
+            b.damage = Math.round(ENEMY.spitter.shotDamage * diff().damage);
             b.radius = 7;
           }
         }
@@ -510,13 +597,32 @@ export function createWorld(random) {
         // The Tyrantling and the Ash Tyrant share one mind: chase, spawn mites, and
         // telegraph a charge. Only the numbers differ (see ENEMY in config.js).
         const def = ENEMY[e.kind];
+        // Phase 2 — the Ash Tyrant only, at half health: it rages, bursts a ring of
+        // mites around itself, and from here on charges sooner and faster and spawns
+        // sooner. The Tyrantling has no second phase.
+        if (e.kind === KIND_BOSS && e.phase === 1 && e.hp <= e.maxHp * 0.5) {
+          e.phase = 2;
+          e.mode = 'chase';
+          e.modeTimer = 0;
+          e.spawnTimer = 0;
+          state.announce = { text: 'THE TYRANT RAGES!', until: state.elapsed + 2 };
+          state.shake = Math.max(state.shake, 12);
+          ring(e.x, e.y, def.glow, 360);
+          for (let i = 0; i < (def.phase2Burst ?? 6); i += 1) {
+            spawnEnemyAt(KIND_MITE, e.x + (random() - 0.5) * 160, e.y + (random() - 0.5) * 160);
+          }
+        }
+        const raging = e.kind === KIND_BOSS && e.phase === 2;
+        const chargeInterval = raging ? (def.phase2ChargeInterval ?? def.chargeInterval) : def.chargeInterval;
+        const chargeSpeed = raging ? (def.phase2ChargeSpeed ?? def.chargeSpeed) : def.chargeSpeed;
+        const spawnInterval = raging ? (def.phase2SpawnInterval ?? def.spawnInterval) : def.spawnInterval;
         e.modeTimer -= dt;
         e.spawnTimer -= dt;
         if (e.mode === 'chase') {
           e.x += ux * e.speed * dt;
           e.y += uy * e.speed * dt;
           if (e.spawnTimer <= 0) {
-            e.spawnTimer = def.spawnInterval;
+            e.spawnTimer = spawnInterval;
             let alive = 0;
             for (const other of enemies) if (other.active && other.kind === KIND_MITE) alive += 1;
             for (let i = 0; i < 4 && alive < 12; i += 1) {
@@ -536,8 +642,8 @@ export function createWorld(random) {
             e.modeTimer = def.chargeTime;
           }
         } else if (e.mode === 'charge') {
-          e.x += e.chargeX * def.chargeSpeed * dt;
-          e.y += e.chargeY * def.chargeSpeed * dt;
+          e.x += e.chargeX * chargeSpeed * dt;
+          e.y += e.chargeY * chargeSpeed * dt;
           if (e.modeTimer <= 0) {
             e.mode = 'recover';
             e.modeTimer = 0.6;
@@ -545,7 +651,7 @@ export function createWorld(random) {
         } else if (e.mode === 'recover') {
           if (e.modeTimer <= 0) {
             e.mode = 'chase';
-            e.modeTimer = def.chargeInterval;
+            e.modeTimer = chargeInterval;
           }
         }
       } else {
@@ -663,7 +769,7 @@ export function createWorld(random) {
           events |= EVENT_HEAL;
           burst(g.x, g.y, '#ff5a7a', 8, 110);
         } else {
-          state.xp += g.value;
+          state.xp += g.value * stats.xpGain;
           state.score += g.value * 2;
           events |= EVENT_PICKUP;
           burst(g.x, g.y, '#ff9a2e', 4, 80);
@@ -880,7 +986,10 @@ export function createWorld(random) {
           state.spawnTimer = wave.interval;
           const kind = state.spawnQueue.shift();
           const spawned = spawnEnemy(kind);
-          if (spawned && kind === KIND_BOSS) events |= EVENT_BOSS;
+          if (spawned && kind === KIND_BOSS) {
+            events |= EVENT_BOSS;
+            state.announce = { text: 'THE ASH TYRANT WAKES', until: state.elapsed + 2 };
+          }
         }
       } else if (aliveEnemies() === 0) {
         state.score += 100 * state.wave;
@@ -891,7 +1000,7 @@ export function createWorld(random) {
         } else {
           state.waveState = 'between';
           state.stateTimer = BETWEEN_WAVE_SECONDS;
-          player.hp = Math.min(stats.maxHp, player.hp + BETWEEN_WAVE_HEAL);
+          player.hp = Math.min(stats.maxHp, player.hp + BETWEEN_WAVE_HEAL + stats.waveHeal);
         }
       }
     } else if (state.waveState === 'between') {
@@ -915,9 +1024,17 @@ export function createWorld(random) {
     events |= updateNovaAndOrbs(dt);
     // Kindled Ground: the floor burns, foes standing in the flames catch alight, and
     // burning foes trail fire behind them. A foe the fire finishes counts as a kill,
-    // and the Tyrant burning to death is still a victory.
+    // and the Tyrant burning to death is still a victory. The burn damage is counted
+    // here, through the callback the fire is handed — the fire module itself is
+    // untouched: every burn tick adds to the run's fire-damage ledger, and every foe
+    // the fire finishes is counted for the burning feat.
     let fireEvents = 0;
-    fire.updateGroundFire(dt, enemies, damageEnemy, (e) => {
+    const burnDamage = (e, amount, color) => {
+      state.fireDamageTotal += amount;
+      return damageEnemy(e, amount, color);
+    };
+    fire.updateGroundFire(dt, enemies, burnDamage, (e) => {
+      state.foesBurned += 1;
       fireEvents |= EVENT_KILL;
       if (e.kind === KIND_BOSS) fireEvents |= EVENT_VICTORY;
     }, random, stats);
@@ -960,5 +1077,8 @@ export function createWorld(random) {
   }
 
   reset();
-  return { state, reset, step, applyUpgrade, grantXp, nearestEnemy, aliveEnemies };
+  return {
+    state, reset, step, applyUpgrade, grantXp, nearestEnemy, aliveEnemies,
+    setDifficulty, grantRelic,
+  };
 }

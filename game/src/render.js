@@ -9,7 +9,17 @@
 // reads at a glance. Glow is drawn with plain layered circles, not shadowBlur, wherever a
 // shape repeats every frame — shadowBlur is slow on weak hardware, and the arena is crowded.
 
-import { ENEMY, FIELD, FONT, LAST_WAVE, PALETTE, VIGNETTE, WAVES } from './config.js';
+import {
+  DIFFICULTY,
+  DIFFICULTY_ORDER,
+  ENEMY,
+  FIELD,
+  FONT,
+  LAST_WAVE,
+  PALETTE,
+  VIGNETTE,
+  WAVES,
+} from './config.js';
 import {
   BOSS_KINDS,
   KIND_BOSS,
@@ -20,7 +30,9 @@ import {
   KIND_SPLITTER,
   KIND_TYRANTLING,
 } from './world.js';
-import { findUpgrade } from './upgrades.js';
+import { UPGRADE_DEFS, findUpgrade } from './upgrades.js';
+import { RELIC_COUNT, findRelic } from './relics.js';
+import { GRADE_COLORS, computeFeats, computeGrade, readRuns } from './save.js';
 
 export const SCREEN_TITLE = 'title';
 export const SCREEN_PLAY = 'play';
@@ -52,6 +64,8 @@ export function createRenderer(canvas) {
   const fonts = new Map();
   /** The level-up cards drawn last frame, in playfield coordinates: {x, y, w, h, index}. */
   const cardRects = [];
+  /** The title screen's difficulty buttons, same shape as cardRects. */
+  const difficultyRects = [];
 
   function resize() {
     const ratio = window.devicePixelRatio || 1;
@@ -347,6 +361,59 @@ export function createRenderer(canvas) {
     circle(e.x, e.y, radius, body);
   }
 
+  /**
+   * The Ash Tyrant, drawn as its own creature — not a bigger spiked circle. A broad
+   * squat mass, a crown of flame horns across its brow, and a great burning core in
+   * its chest. In phase 2 the crown burns white-hot, the core flares, and a ring of
+   * fire kindles around it, so the raging Tyrant reads differently at a glance. The
+   * shared code after the shape branch still draws its eyes, its burn flame, its hit
+   * flash and its health bar.
+   */
+  function drawBoss(e, state) {
+    const phase2 = e.phase === 2;
+    const body = '#6a3648';
+    const horn = phase2 ? '#ffd76a' : '#ff7a2e';
+    const core = phase2 ? '#ffd76a' : '#ff2e63';
+    if (phase2) {
+      // A ring of fire around the raging Tyrant.
+      context.save();
+      context.globalAlpha = 0.5 + 0.2 * Math.sin(state.elapsed * 9);
+      context.strokeStyle = '#ff7a2e';
+      context.lineWidth = 5;
+      context.beginPath();
+      context.arc(e.x, e.y, e.radius + 14, 0, TAU);
+      context.stroke();
+      context.restore();
+      glowCircle(e.x, e.y, e.radius * 1.05, core, 0.4);
+    }
+    // The broad squat body.
+    drawSpikedBody(e, state, body, 8, e.radius);
+    // A crown of five flame horns fanning across the brow, each a flame tongue.
+    for (let i = -2; i <= 2; i += 1) {
+      const angle = -Math.PI / 2 + i * 0.34;
+      const base = e.radius * 0.62;
+      const tip = e.radius + 20 - Math.abs(i) * 4;
+      const bx = e.x + Math.cos(angle) * base;
+      const by = e.y + Math.sin(angle) * base;
+      const tx = e.x + Math.cos(angle) * tip;
+      const ty = e.y + Math.sin(angle) * tip;
+      const spread = 0.13;
+      const lx = e.x + Math.cos(angle - spread) * base;
+      const ly = e.y + Math.sin(angle - spread) * base;
+      const rx = e.x + Math.cos(angle + spread) * base;
+      const ry = e.y + Math.sin(angle + spread) * base;
+      context.fillStyle = horn;
+      context.beginPath();
+      context.moveTo(lx, ly);
+      context.quadraticCurveTo(tx, ty, rx, ry);
+      context.closePath();
+      context.fill();
+    }
+    // The great burning core in its chest, white-hot at the heart.
+    glowCircle(e.x, e.y, e.radius * 0.55, core, 0.9);
+    circle(e.x, e.y, e.radius * 0.26, '#fff3c4');
+  }
+
   function drawEnemy(e, state) {
     const def = e.kind === KIND_MITE ? { body: '#d09a55', glow: '#ffb347', spikes: 5 }
       : e.kind === KIND_BRUTE ? { body: '#9a5644', glow: '#ff6b4a', spikes: 6 }
@@ -464,6 +531,8 @@ export function createRenderer(canvas) {
       const tipY = e.y + Math.sin(angle) * e.radius * 1.9;
       const charge = 0.55 + 0.35 * Math.sin(state.elapsed * 6 + e.x);
       glowCircle(tipX, tipY, e.radius * 0.3, def.glow, charge);
+    } else if (e.kind === KIND_BOSS) {
+      drawBoss(e, state);
     } else {
       drawSpikedBody(e, state, def.body, def.spikes, e.radius);
       if (BOSS_KINDS.includes(e.kind)) {
@@ -576,10 +645,19 @@ export function createRenderer(canvas) {
 
   const PLAYER_RADIUS_GLOW = 30;
 
+  /** An elite brute burns brighter than its kin: a wide ember halo beneath it. */
+  function drawEliteGlow(state) {
+    for (const e of state.enemies) {
+      if (!e.active || !e.elite) continue;
+      glowCircle(e.x, e.y, e.radius * 1.7, '#ffb347', 0.55);
+    }
+  }
+
   function drawField(state) {
     drawFloor(state);
     drawFire(state);
     drawGems(state);
+    drawEliteGlow(state);
     for (const b of state.ebullets) {
       if (!b.active) continue;
       glowCircle(b.x, b.y, b.radius, '#c07bff', 0.9);
@@ -746,7 +824,39 @@ export function createRenderer(canvas) {
     }
   }
 
-  function drawHud(state, muted) {
+  /**
+   * Relics carried, bottom right above the mute hint: a "RELICS n/6" count chip, then
+   * one chip per relic found, each edged in its relic's colour. Right-aligned, so the
+   * row grows leftward as the run finds more. Shown even at 0/6 — an empty set is
+   * still a goal the player can see.
+   */
+  function drawRelicChips(state) {
+    const owned = state.relics ?? [];
+    const y = FIELD.height - 72;
+    const labels = [`RELICS ${owned.length}/${RELIC_COUNT}`];
+    for (const id of owned) {
+      const def = findRelic(id);
+      labels.push(def ? def.name : id);
+    }
+    context.font = font(13);
+    let x = FIELD.width - 20;
+    for (let i = 0; i < labels.length; i += 1) {
+      const label = labels[i];
+      const w = context.measureText(label).width + 14;
+      x -= w;
+      const def = i === 0 ? null : findRelic(owned[i - 1]);
+      context.fillStyle = 'rgba(42,30,46,0.85)';
+      context.fillRect(x, y, w, 22);
+      context.strokeStyle = def ? def.color : PALETTE.panelEdge;
+      context.lineWidth = 1.5;
+      context.strokeRect(x, y, w, 22);
+      const color = i === 0 && owned.length === 0 ? PALETTE.dim : PALETTE.text;
+      text(label, x + 7, y + 15, 13, color);
+      x -= 6;
+    }
+  }
+
+  function drawHud(state, muted, screen) {
     // XP bar across the top.
     const xpRatio = Math.min(1, state.xp / state.xpNext);
     context.fillStyle = '#2a1e2e';
@@ -782,7 +892,9 @@ export function createRenderer(canvas) {
       const w = 420;
       const x = (FIELD.width - w) / 2;
       const y = 94;
-      const label = boss.kind === KIND_BOSS ? 'ASH TYRANT' : 'TYRANTLING';
+      const label = boss.kind === KIND_BOSS
+        ? (boss.phase === 2 ? 'ASH TYRANT · PHASE 2/2' : 'ASH TYRANT')
+        : 'TYRANTLING';
       text(label, FIELD.width / 2, y + 8, 15, PALETTE.danger, 'center', 'middle');
       context.fillStyle = PALETTE.hpBack;
       context.fillRect(x, y + 16, w, 12);
@@ -793,8 +905,9 @@ export function createRenderer(canvas) {
       context.strokeRect(x, y + 16, w, 12);
     }
 
-    // Who is still to come, under the HP bar.
-    drawIncomingPanel(state);
+    // Who is still to come, under the HP bar. Hidden while levelling up: the
+    // cards sit over the panel's bottom-right corner.
+    if (screen !== SCREEN_LEVELUP) drawIncomingPanel(state);
 
     // Blessings owned, bottom left: full name and level, edged in the blessing's colour.
     // Parchment chips, like the goal bar and the incoming panel: the HUD reads as one
@@ -840,6 +953,10 @@ export function createRenderer(canvas) {
       text(`Mend your wounds — next wave in ${Math.ceil(state.stateTimer)}…`, FIELD.width / 2, FIELD.height / 2 - 16, 20, PALETTE.text, 'center', 'middle');
       context.restore();
     }
+
+    // Relic chips, bottom right. Hidden on the end screens: the end panel lists
+    // the relics carried, and the chips would peek past its right edge.
+    if (screen !== SCREEN_OVER && screen !== SCREEN_VICTORY) drawRelicChips(state);
   }
 
   function drawPanel(title, lines, prompt, dim = 0.72) {
@@ -861,18 +978,73 @@ export function createRenderer(canvas) {
     text(prompt, FIELD.width / 2, y + height - 36, 22, PALETTE.ember, 'center');
   }
 
+  /**
+   * The title screen is the game's shop window: the name, what the game holds, the
+   * hook, the trial to choose, and what past wardens achieved — over the living arena,
+   * which keeps burning behind a light dim. The difficulty buttons are recorded in
+   * `difficultyRects` so a click can choose a trial.
+   */
   function drawTitle(state, best) {
-    const lines = [
-      'Survive 7 waves of ash-foes. Slay the Ash Tyrant.',
-      'Your bolts set the floor alight —',
-      'herd the horde through the flames.',
-      'Gather embers, level up, choose a blessing.',
-      'Move: WASD or arrows  •  Pause: P  •  Mute: M',
-      best > 0 ? `Best score: ${best}` : 'No warden has fallen yet — be the first legend.',
-    ];
-    // A light dim: the living arena should show around the panel.
-    drawPanel('EMBERFALL', lines, 'Click or press Space to begin', 0.35);
-    text('ASHEN ARENA', FIELD.width / 2, (FIELD.height - (PANEL.top + lines.length * PANEL.line + PANEL.bottom)) / 2 + 118, 18, PALETTE.waveBanner, 'center');
+    difficultyRects.length = 0;
+    const foes = Object.keys(ENEMY).length - BOSS_KINDS.length;
+    // A light dim: the living arena should show around the text.
+    context.fillStyle = 'rgba(38,28,42,0.45)';
+    context.fillRect(0, 0, FIELD.width, FIELD.height);
+
+    text('EMBERFALL', FIELD.width / 2, 88, 64, PALETTE.text, 'center');
+    text('ASHEN ARENA', FIELD.width / 2, 122, 20, PALETTE.waveBanner, 'center');
+    text(
+      `${LAST_WAVE} WAVES · ${BOSS_KINDS.length} BOSSES · ${UPGRADE_DEFS.length} BLESSINGS · ${RELIC_COUNT} RELICS · ${foes} FOES`,
+      FIELD.width / 2, 156, 18, PALETTE.ember, 'center',
+    );
+    text('Survive 7 waves of ash-foes. Slay the Ash Tyrant.', FIELD.width / 2, 194, 18, PALETTE.text, 'center');
+    text('Your bolts set the floor alight — herd the horde through the flames.', FIELD.width / 2, 220, 18, PALETTE.text, 'center');
+
+    // The trial select: three buttons, the chosen one lit gold.
+    const current = state.difficulty ?? DIFFICULTY_ORDER[1];
+    text('CHOOSE YOUR TRIAL', FIELD.width / 2, 262, 15, PALETTE.muted, 'center');
+    const bw = 220;
+    const bh = 62;
+    const gap = 20;
+    const total = DIFFICULTY_ORDER.length * bw + (DIFFICULTY_ORDER.length - 1) * gap;
+    let x = (FIELD.width - total) / 2;
+    const y = 276;
+    for (let i = 0; i < DIFFICULTY_ORDER.length; i += 1) {
+      const id = DIFFICULTY_ORDER[i];
+      const def = DIFFICULTY[id];
+      const selected = id === current;
+      difficultyRects.push({ x, y, w: bw, h: bh, index: i });
+      context.fillStyle = selected ? '#4a3550' : PALETTE.card;
+      context.fillRect(x, y, bw, bh);
+      context.strokeStyle = selected ? PALETTE.cardEdge : PALETTE.panelEdge;
+      context.lineWidth = selected ? 3 : 1.5;
+      context.strokeRect(x, y, bw, bh);
+      text(`[${i + 1}] ${def.name}`, x + bw / 2, y + 27, 20, selected ? PALETTE.text : PALETTE.muted, 'center', 'middle');
+      text(def.hint, x + bw / 2, y + 48, 13, PALETTE.dim, 'center', 'middle');
+      x += bw + gap;
+    }
+
+    // Best score and the last runs, newest first.
+    const runs = readRuns();
+    text(
+      best > 0 ? `BEST ${best}` : 'BEST — no warden has fallen yet',
+      FIELD.width / 2, 392, 20, best > 0 ? PALETTE.waveBanner : PALETTE.dim, 'center',
+    );
+    text('LAST RUNS', FIELD.width / 2, 424, 14, PALETTE.muted, 'center');
+    if (runs.length === 0) {
+      text('No runs yet — the arena awaits its first legend.', FIELD.width / 2, 452, 16, PALETTE.dim, 'center');
+    } else {
+      for (let i = 0; i < runs.length; i += 1) {
+        const run = runs[i];
+        text(
+          `${run.victory ? 'VICTORY' : 'FALLEN'}  ·  ${run.score}  ·  Grade ${run.grade}  ·  ${formatTime(run.time)}  ·  Lv ${run.level}  ·  ${run.relics} relics`,
+          FIELD.width / 2, 452 + i * 24, 16, run.victory ? PALETTE.text : PALETTE.muted, 'center',
+        );
+      }
+    }
+
+    text('Move: WASD or arrows  •  Pause: P  •  Mute: M  •  Trial: 1 / 2 / 3 or click', FIELD.width / 2, 566, 16, PALETTE.muted, 'center');
+    text('Click or press Space to begin', FIELD.width / 2, 604, 22, PALETTE.ember, 'center');
   }
 
   /** The small canvas icon on a blessing's card, drawn from its `icon` key. */
@@ -1001,19 +1173,133 @@ export function createRenderer(canvas) {
     }
   }
 
+  /**
+   * The end of a run, as a full report: the grade the run earned, a grid of
+   * statistics, the six feats with their checks, the relics carried, and the last
+   * runs. A defeat gets the same report (its grade is C or D, its feats mostly
+   * unchecked) — the warden sees what the run was, either way.
+   */
   function drawEnd(state, best, victory) {
-    const lines = victory
-      ? [
-          `Score ${state.score}   •   Kills ${state.kills}   •   Time ${formatTime(state.elapsed)}`,
-          `Level ${state.level}   •   Best ${Math.max(best, state.score)}`,
-          'The arena is quiet. The ember is yours.',
-        ]
-      : [
-          `Score ${state.score}   •   Wave ${Math.max(1, state.wave)} / ${LAST_WAVE}   •   Kills ${state.kills}`,
-          `Time ${formatTime(state.elapsed)}   •   Best ${Math.max(best, state.score)}`,
-          'The ash takes another warden. Rise again.',
-        ];
-    drawPanel(victory ? 'THE ASH TYRANT FALLS' : 'THE EMBER DIES', lines, 'Press R or click to play again', 0.5);
+    const grade = computeGrade({
+      victory,
+      time: state.elapsed,
+      damageTaken: state.damageTaken,
+      wave: state.wave,
+    });
+    const feats = computeFeats(state);
+    const done = feats.filter((feat) => feat.done).length;
+    const runs = readRuns();
+    const owned = state.relics ?? [];
+
+    context.fillStyle = 'rgba(38,28,42,0.6)';
+    context.fillRect(0, 0, FIELD.width, FIELD.height);
+    const x = 140;
+    const y = 20;
+    const w = 1000;
+    const h = 680;
+    context.fillStyle = PALETTE.panel;
+    context.fillRect(x, y, w, h);
+    context.strokeStyle = PALETTE.panelEdge;
+    context.lineWidth = 2;
+    context.strokeRect(x, y, w, h);
+
+    text(
+      victory ? 'THE ASH TYRANT FALLS' : 'THE EMBER DIES',
+      FIELD.width / 2, y + 58, 40, PALETTE.text, 'center',
+    );
+    text(
+      victory ? 'The arena is quiet. The ember is yours.' : 'The ash takes another warden. Rise again.',
+      FIELD.width / 2, y + 88, 17, PALETTE.muted, 'center',
+    );
+
+    // The grade, large, on the left.
+    text('GRADE', x + 120, y + 140, 15, PALETTE.muted, 'center');
+    text(grade, x + 120, y + 235, 100, GRADE_COLORS[grade] ?? PALETTE.text, 'center');
+
+    // The statistics grid, four columns by two rows, beside the grade.
+    const cells = [
+      ['SCORE', String(state.score)],
+      ['KILLS', String(state.kills)],
+      ['TIME', formatTime(state.elapsed)],
+      ['LEVEL', String(state.level)],
+      ['FIRE DAMAGE', String(Math.round(state.fireDamageTotal))],
+      ['DAMAGE TAKEN', String(Math.round(state.damageTaken))],
+      ['RELICS', `${owned.length}/${RELIC_COUNT}`],
+      ['BEST', String(Math.max(best, state.score))],
+    ];
+    const gx = x + 240;
+    const colW = 190;
+    for (let i = 0; i < cells.length; i += 1) {
+      const col = i % 4;
+      const row = Math.floor(i / 4);
+      const cx = gx + col * colW;
+      const cy = y + 140 + row * 95;
+      text(cells[i][0], cx, cy, 13, PALETTE.dim, 'left');
+      text(cells[i][1], cx, cy + 30, 24, PALETTE.text, 'left');
+    }
+
+    // The feats checklist, two columns of three.
+    text(`FEATS ${done}/${feats.length}`, x + 40, y + 310, 16, PALETTE.muted, 'left');
+    for (let i = 0; i < feats.length; i += 1) {
+      const col = Math.floor(i / 3);
+      const row = i % 3;
+      const fx = x + 40 + col * 500;
+      const fy = y + 340 + row * 28;
+      const mark = feats[i].done ? '✓' : '○';
+      text(`${mark}  ${feats[i].name}`, fx, fy, 17, feats[i].done ? PALETTE.text : PALETTE.dim, 'left');
+    }
+
+    // The relics this run carried, by name.
+    text('RELICS CARRIED', x + 40, y + 452, 16, PALETTE.muted, 'left');
+    if (owned.length === 0) {
+      text('None found this run.', x + 40, y + 478, 15, PALETTE.dim, 'left');
+    } else {
+      const names = owned.map((id) => {
+        const def = findRelic(id);
+        return def ? def.name : id;
+      });
+      let line = names.join('  ·  ');
+      context.font = font(15);
+      while (context.measureText(line).width > w - 80 && names.length > 1) {
+        names.pop();
+        line = `${names.join('  ·  ')}  ·  …`;
+      }
+      text(line, x + 40, y + 478, 15, PALETTE.text, 'left');
+    }
+
+    // The last runs, newest first — the run just finished heads the list.
+    text('LAST RUNS', x + 40, y + 532, 16, PALETTE.muted, 'left');
+    if (runs.length === 0) {
+      text('No runs recorded yet.', x + 40, y + 558, 15, PALETTE.dim, 'left');
+    }
+    for (let i = 0; i < runs.length; i += 1) {
+      const run = runs[i];
+      text(
+        `${run.victory ? 'VICTORY' : 'FALLEN'}  ·  ${run.score}  ·  Grade ${run.grade}  ·  ${formatTime(run.time)}  ·  Lv ${run.level}  ·  ${run.relics} relics`,
+        x + 40, y + 558 + i * 24, 15, run.victory ? PALETTE.text : PALETTE.muted, 'left',
+      );
+    }
+
+    text('Press R or click to play again', FIELD.width / 2, y + 662, 20, PALETTE.ember, 'center');
+  }
+
+  /**
+   * The dramatic moment, when the world has set one: the Tyrant waking, the Tyrant
+   * raging, a relic found. Large centred text that holds for a moment and fades over
+   * its last half-second. Only on the play screens — never over a panel.
+   */
+  function drawAnnouncement(state, screen) {
+    if (screen !== SCREEN_PLAY && screen !== SCREEN_LEVELUP) return;
+    const a = state.announce;
+    if (!a) return;
+    const remain = a.until - state.elapsed;
+    if (remain <= 0) return;
+    const alpha = Math.min(1, remain / 0.5);
+    context.save();
+    context.globalAlpha = alpha;
+    text(a.text, FIELD.width / 2 + 3, 203, 46, 'rgba(23,16,29,0.85)', 'center', 'middle');
+    text(a.text, FIELD.width / 2, 200, 46, PALETTE.waveBanner, 'center', 'middle');
+    context.restore();
   }
 
   /** Paint one frame: the field, then the HUD or a panel for the screen the game is on. */
@@ -1029,7 +1315,8 @@ export function createRenderer(canvas) {
       drawTitle(state, best);
       return;
     }
-    drawHud(state, muted);
+    drawHud(state, muted, screen);
+    drawAnnouncement(state, screen);
     if (screen === SCREEN_LEVELUP) drawLevelUp(state);
     else if (screen === SCREEN_PAUSED) drawPanel('Paused', ['The ash waits for no one — except now.'], 'Press P to resume');
     else if (screen === SCREEN_OVER) drawEnd(state, best, false);
@@ -1038,5 +1325,5 @@ export function createRenderer(canvas) {
 
   resize();
   window.addEventListener('resize', resize);
-  return { draw, toField, cardRects };
+  return { draw, toField, cardRects, difficultyRects };
 }

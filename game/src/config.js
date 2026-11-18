@@ -21,7 +21,10 @@ export const PLAYER = {
   radius: 15,
   speed: 265,
   maxHp: 100,
-  boltDamage: 15,
+  // 16, not 15: the bigger Tyrant and its raging second phase (plus the elite brutes
+  // that now end four waves) cost the autopilot a win in eight at 15; one point of bolt
+  // damage buys it back (7/8) without changing how any wave feels to a human player.
+  boltDamage: 16,
   fireInterval: 0.5,
   boltSpeed: 560,
   boltRadius: 6,
@@ -74,10 +77,13 @@ export const ENEMY = {
     name: 'Tyrantling', hint: 'young Tyrant, charges hard',
   },
   boss: {
-    radius: 42, hp: 2400, speed: 74, contact: 26, xp: 50, score: 1000,
+    radius: 60, hp: 2400, speed: 74, contact: 26, xp: 50, score: 1000,
     body: '#6a3648', glow: '#ff2e63', spikes: 8,
     spawnInterval: 5, chargeInterval: 6, chargeSpeed: 460, chargeTime: 0.7, telegraphTime: 0.7,
     name: 'Ash Tyrant', hint: 'the final flame',
+    // Phase 2, entered at half health: the Tyrant charges sooner and faster, spawns
+    // minions sooner, and bursts a ring of mites around itself the moment it rages.
+    phase2ChargeInterval: 3.5, phase2ChargeSpeed: 600, phase2SpawnInterval: 3, phase2Burst: 6,
   },
 };
 
@@ -202,3 +208,43 @@ export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 
 /** Where the best score is kept between visits (this browser only). */
 export const BEST_KEY = 'emberfall.best';
+
+/** Where the last few runs are kept between visits (this browser only). */
+export const RUNS_KEY = 'emberfall.runs';
+
+/**
+ * The three trials the title screen offers. `hp` and `damage` multiply every foe's
+ * health and damage; `score` multiplies the score a kill earns. Wildfire is the true
+ * trial — every multiplier 1 — and the default, so a run that never touches the title
+ * screen plays exactly as before.
+ */
+export const DIFFICULTY = {
+  ember: {
+    name: 'Ember', hint: 'Foes weaker · Score x0.8',
+    hp: 0.85, damage: 0.8, score: 0.8,
+  },
+  wildfire: {
+    name: 'Wildfire', hint: 'The true trial · Score x1',
+    hp: 1, damage: 1, score: 1,
+  },
+  inferno: {
+    name: 'Inferno', hint: 'Foes stronger · Score x1.25',
+    hp: 1.25, damage: 1.25, score: 1.25,
+  },
+};
+
+/** The trials in the order the title screen shows them (and the 1/2/3 keys pick them). */
+export const DIFFICULTY_ORDER = ['ember', 'wildfire', 'inferno'];
+
+/** The trial a fresh world starts on — the true trial, so staged runs never change. */
+export const DEFAULT_DIFFICULTY = 'wildfire';
+
+/**
+ * Relic drops: the Tyrantling and the Ash Tyrant each drop one relic when they fall,
+ * and so does one elite brute in each of these waves. An elite brute is twice as hard
+ * to kill and burns brighter than its kin — the last brute to spawn in the wave, so
+ * the wave ends on a duel rather than a damage sponge in the middle of the horde.
+ * Six relics exist and six can drop in a run, so a perfect run carries the whole set.
+ */
+export const ELITE_BRUTE_WAVES = [2, 3, 5, 6];
+export const ELITE_HP_MULTIPLIER = 2;
