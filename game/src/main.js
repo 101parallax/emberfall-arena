@@ -9,8 +9,9 @@
 // burns foes, spreads as they run, and can be grown by the Wildfire blessing, so the fight
 // is about herding the horde through the flames as much as shooting it. Five foe kinds
 // (mite, brute, spitter, dasher, splitter), a Tyrantling mini-boss on wave 4, and the Ash
-// Tyrant on wave 7; nine stackable blessings; a living title screen with the arena burning
-// behind the panel.
+// Tyrant on wave 7 — bigger now, and raging into a second phase at half health; nine
+// stackable blessings; six relics carried from fallen champions; three trials to choose
+// from on a living title screen, with the arena burning behind the panel.
 //
 // ?seed=N fixes the run's rolls. ?shot=start|play|levelup|end (with &seed=N) stages that
 // scene instead of running the loop, paints it twice and sets window.__shotReady for a
@@ -19,7 +20,8 @@
 // For play-testing, window.__emberfall exposes the screen, the live state and a small debug
 // handle (grant XP, set HP, force a win) — it changes nothing about the game itself.
 
-import { BEST_KEY, STEP } from './config.js';
+import { DEFAULT_DIFFICULTY, DIFFICULTY, DIFFICULTY_ORDER, STEP } from './config.js';
+import { computeGrade, readBest, recordRun, saveBest } from './save.js';
 import { createRandom } from './random.js';
 import {
   EVENT_BOSS,
@@ -73,22 +75,6 @@ const world = createWorld(createRandom(seed));
 const renderer = createRenderer(canvas);
 const audio = createAudio();
 
-function readBest() {
-  try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-  } catch {
-    return 0;
-  }
-}
-
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
-  }
-}
-
 function runShot(name) {
   const scene = stageShot(name, world, () => createWorld(createRandom(seed)));
   const staged = scene.world ?? world;
@@ -106,6 +92,7 @@ function runGame() {
   const input = createInput(canvas, (x, y) => renderer.toField(x, y));
   let screen = SCREEN_TITLE;
   let best = readBest();
+  let difficulty = DEFAULT_DIFFICULTY;
   let accumulator = 0;
   let last = performance.now();
   let lastSoundAt = { shoot: 0, kill: 0, pickup: 0 };
@@ -140,9 +127,19 @@ function runGame() {
     else if (events & EVENT_OVER) endRun(false);
   }
 
+  /** Choose the trial the next run plays on (title screen, keys 1/2/3 or a click). */
+  function setDifficulty(id) {
+    if (!DIFFICULTY[id] || id === difficulty) return;
+    difficulty = id;
+    world.setDifficulty(id);
+    audio.click();
+    announce(`Trial: ${DIFFICULTY[id].name}.`);
+  }
+
   function startGame() {
     audio.unlock();
     audio.startDrone();
+    world.setDifficulty(difficulty);
     world.reset();
     accumulator = 0;
     screen = SCREEN_PLAY;
@@ -158,10 +155,27 @@ function runGame() {
       best = world.state.score;
       saveBest(best);
     }
+    // The run joins the record before the end screen paints, so the last-runs list
+    // on the victory screen already includes the run just finished.
+    const grade = computeGrade({
+      victory,
+      time: world.state.elapsed,
+      damageTaken: world.state.damageTaken,
+      wave: world.state.wave,
+    });
+    recordRun({
+      score: world.state.score,
+      kills: world.state.kills,
+      time: Math.round(world.state.elapsed),
+      level: world.state.level,
+      relics: world.state.relics.length,
+      victory,
+      grade,
+    });
     announce(
       victory
-        ? `Victory. Score ${world.state.score}. Best ${best}.`
-        : `Game over. Score ${world.state.score}. Best ${best}.`,
+        ? `Victory. Score ${world.state.score}. Grade ${grade}. Best ${best}.`
+        : `Game over. Score ${world.state.score}. Grade ${grade}. Best ${best}.`,
     );
   }
 
@@ -189,6 +203,17 @@ function runGame() {
     return false;
   }
 
+  /** A click on a title-screen difficulty button chooses that trial (and stays put). */
+  function clickDifficulty(point) {
+    for (const rect of renderer.difficultyRects) {
+      if (point.x >= rect.x && point.x <= rect.x + rect.w && point.y >= rect.y && point.y <= rect.y + rect.h) {
+        setDifficulty(DIFFICULTY_ORDER[rect.index]);
+        return true;
+      }
+    }
+    return false;
+  }
+
   function handleActions() {
     const actions = input.takeActions();
     const click = input.takeClick();
@@ -197,7 +222,14 @@ function runGame() {
       announce(muted ? 'Sound off.' : 'Sound on.');
     }
     if (screen === SCREEN_TITLE) {
-      if (actions & ACTION_CONFIRM) startGame();
+      if (actions & ACTION_PICK_1) setDifficulty(DIFFICULTY_ORDER[0]);
+      else if (actions & ACTION_PICK_2) setDifficulty(DIFFICULTY_ORDER[1]);
+      else if (actions & ACTION_PICK_3) setDifficulty(DIFFICULTY_ORDER[2]);
+      // A click on a difficulty button chooses the trial instead of starting the
+      // game — the click also raises ACTION_CONFIRM, which is swallowed here.
+      if (click && clickDifficulty(click)) {
+        // Chosen; stay on the title screen.
+      } else if (actions & ACTION_CONFIRM) startGame();
     } else if (screen === SCREEN_PLAY) {
       if (actions & ACTION_PAUSE) {
         screen = SCREEN_PAUSED;
@@ -265,8 +297,14 @@ function runGame() {
     get state() {
       return world.state;
     },
+    get difficulty() {
+      return difficulty;
+    },
     start: startGame,
     debug: {
+      grantRelic() {
+        return world.grantRelic();
+      },
       grantXp(amount) {
         const events = world.grantXp(amount);
         if (events & EVENT_LEVELUP) {
