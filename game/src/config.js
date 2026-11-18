@@ -41,36 +41,43 @@ export const ENEMY = {
   mite: {
     radius: 11, hp: 30, speed: 196, contact: 9, xp: 1, score: 10,
     body: '#d09a55', glow: '#ffb347', spikes: 5,
+    name: 'Cinderling', hint: 'swarms in packs',
   },
   brute: {
     radius: 20, hp: 110, speed: 88, contact: 16, xp: 3, score: 30,
     body: '#9a5644', glow: '#ff6b4a', spikes: 6,
+    name: 'Cinderhulk', hint: 'slow, shrugs off bolts',
   },
   spitter: {
     radius: 13, hp: 45, speed: 116, contact: 10, xp: 2, score: 25,
     body: '#8a68b8', glow: '#c07bff', spikes: 4,
     shotInterval: 2.4, shotSpeed: 225, shotDamage: 12, keepRange: 270,
+    name: 'Gloamaw', hint: 'spits embers from range',
   },
   dasher: {
     radius: 12, hp: 40, speed: 128, contact: 12, xp: 2, score: 25,
     body: '#b8542e', glow: '#ff8a3c', spikes: 3,
     dashRange: 230, dashTelegraph: 0.5, dashSpeed: 520, dashTime: 0.35, dashCooldown: 2.6,
+    name: 'Ashdart', hint: 'telegraphs, then dashes',
   },
   splitter: {
     radius: 16, hp: 55, speed: 132, contact: 11, xp: 2, score: 30,
     body: '#5a8a4a', glow: '#b8ff5a', spikes: 4,
     /** How many mites burst out of a slain splitter. */
     children: 2,
+    name: 'Twinsoot', hint: 'splits in two when slain',
   },
   tyrantling: {
     radius: 30, hp: 700, speed: 84, contact: 20, xp: 25, score: 500,
     body: '#6a3244', glow: '#ff4a6a', spikes: 7,
     spawnInterval: 8, chargeInterval: 7, chargeSpeed: 420, chargeTime: 0.6, telegraphTime: 0.7,
+    name: 'Tyrantling', hint: 'young Tyrant, charges hard',
   },
   boss: {
     radius: 42, hp: 2400, speed: 74, contact: 26, xp: 50, score: 1000,
     body: '#6a3648', glow: '#ff2e63', spikes: 8,
     spawnInterval: 5, chargeInterval: 6, chargeSpeed: 460, chargeTime: 0.7, telegraphTime: 0.7,
+    name: 'Ash Tyrant', hint: 'the final flame',
   },
 };
 
@@ -141,19 +148,24 @@ export const TITLE_FIRE_SECONDS = 0.45;
 
 export const PALETTE = {
   backdrop: '#17101d',
-  floorA: '#382b3e',
-  floorB: '#413349',
+  floorA: '#3d3044',
+  floorB: '#483850',
   floorEdge: '#5f4a66',
   ruin: '#453543',
   ruinTop: '#6a5270',
   crack: '#ff8a3c',
   crackDim: '#a04a24',
+  vein: '#ff7a3c',
+  veinCore: '#ffe9a8',
   ash: '#b0a0ac',
   fireCore: '#ffd76a',
   fireMid: '#ff7a2e',
   fireEdge: '#ff4a1e',
+  fireHot: '#fff3c4',
   player: '#ffb347',
   playerCore: '#fff3c4',
+  playerCold: '#7fe3ff',
+  playerColdCore: '#eafcff',
   playerCloak: '#7a3a5e',
   bolt: '#ffb347',
   boltCore: '#fff3c4',
@@ -163,6 +175,12 @@ export const PALETTE = {
   text: '#f5ead9',
   muted: '#c4b4a4',
   dim: '#8a7a84',
+  parchment: '#e9dcc0',
+  parchmentEdge: '#6a4a3a',
+  parchmentText: '#2e2118',
+  parchmentDim: '#6a5540',
+  winDark: '#1e6b34',
+  loseDark: '#a11f1f',
   panel: '#382b3f',
   panelEdge: '#6a4a5a',
   hpBar: '#ff5a4a',
@@ -170,13 +188,15 @@ export const PALETTE = {
   xpBar: '#ffb347',
   waveBanner: '#ffb347',
   danger: '#ff2e63',
+  win: '#8dff9e',
+  lose: '#ff8a7a',
   card: '#3a2b44',
   cardEdge: '#ffb347',
   cardHover: '#4a3550',
 };
 
 /** How dark the vignette makes the arena's edges (0 = none, 1 = black). */
-export const VIGNETTE = 0.28;
+export const VIGNETTE = 0.16;
 
 export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 
